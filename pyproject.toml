@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "listapi"
+version = "0.1.0"
+description = "Python client for the LiST REST API (sign-in, fetch, upload)."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+entra = [
+    "msal>=1.28.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["listapi*"]

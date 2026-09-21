@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+dist/
+*.egg-info/
+.eggs/
+config/list.py
+.msal_cache.bin
+*.log
+.DS_Store

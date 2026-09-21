@@ -1,0 +1,11 @@
+"""LiST REST API — copy to list.py and set url / api_key.
+
+  copy config\\list.py.example config\\list.py
+
+Use None for unset values (not "").
+Leave api_key = None to sign in via browser (Microsoft account).
+To obtain an API key: LiST web app → About → FAQ → contact that instance's data manager.
+"""
+
+url = "https://your-list-host/dotnet"  # same base URL as in the browser
+api_key = None
