@@ -39,6 +39,24 @@ pip install -e .
 
 Requires **Python ≥ 3.10**. Core dependency: `requests`.
 
+### Versioning
+
+Bump **`version` in [`pyproject.toml`](pyproject.toml)** for every release (semver). After install, `listapi.__version__` matches that value.
+
+| Change | Bump |
+|--------|------|
+| Bugfix / docs only | patch (`0.2.0` → `0.2.1`) |
+| New helpers / MCP tools / compatible API | minor (`0.2.0` → `0.3.0`) |
+| Breaking Client / `sign_in` behavior | major |
+
+Pin a release from GitHub with a tag (preferred over floating `main`):
+
+```bash
+pip install "git+https://github.com/psu-2dcc/list-api-client.git@v0.2.0"
+```
+
+Create the matching git tag when you publish (`v0.2.0` for version `0.2.0`).
+
 ---
 
 ## Configure / sign in

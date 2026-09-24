@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
 from listapi.auth import sign_in
 from listapi.client import Client
 from listapi.errors import ListApiError
@@ -24,10 +26,17 @@ from listapi.import_status import (
     describe_import_status,
 )
 
+try:
+    __version__ = _pkg_version("listapi")
+except PackageNotFoundError:
+    # Source tree without an install (e.g. raw path on sys.path).
+    __version__ = "0.2.0"
+
 __all__ = [
     "Client",
     "ListApiError",
     "sign_in",
+    "__version__",
     "STATUS_INCOMPLETE",
     "STATUS_ERROR",
     "STATUS_NOTHING_TO_DO",
@@ -45,5 +54,3 @@ __all__ = [
     "FILTER_ERROR",
     "describe_import_status",
 ]
-
-__version__ = "0.1.0"
