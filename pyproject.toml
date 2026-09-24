@@ -16,6 +16,12 @@ dependencies = [
 entra = [
     "msal>=1.28.0",
 ]
+mcp = [
+    "mcp>=1.28,<2",
+]
+
+[project.scripts]
+listapi-mcp = "listapi.mcp_server:main"
 
 [tool.setuptools.packages.find]
 include = ["listapi*"]

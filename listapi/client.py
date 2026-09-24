@@ -169,42 +169,66 @@ class Client:
         Extra kwargs are merged into the search body (camelCase keys preferred).
         Use ``search_kind`` for Active | Snapshot | Both (SampleSearchCriteria.Kind).
         """
-        body: dict[str, Any] = {}
-
-        if syn_instrument is not None:
-            body["instrumentId"] = syn_instrument
-        if syn_technique is not None:
-            body["techniqueId"] = syn_technique
-        if char_instrument is not None:
-            body["characterizationInstrumentId"] = char_instrument
-        if char_technique is not None:
-            body["characterizationTechniqueId"] = char_technique
-
-        if materials is not None:
-            body["materials"] = list(materials)
-        if material_names is not None:
-            body["materialNames"] = list(material_names)
-        if elements is not None:
-            body["elements"] = list(elements)
-
-        if grown_after is not None:
-            body["grownAfter"] = _as_iso(grown_after)
-        if grown_before is not None:
-            body["grownBefore"] = _as_iso(grown_before)
-
-        label_val = sample_id or label
-        if label_val is not None:
-            body["sampleLabel"] = label_val
-
-        for key, value in criteria.items():
-            if value is None:
-                continue
-            if key == "search_kind":
-                body["kind"] = value
-            else:
-                body[key] = _as_iso(value) if isinstance(value, (date, datetime)) else value
-
+        body = _sample_search_body(
+            syn_instrument=syn_instrument,
+            syn_technique=syn_technique,
+            char_instrument=char_instrument,
+            char_technique=char_technique,
+            materials=materials,
+            material_names=material_names,
+            elements=elements,
+            grown_after=grown_after,
+            grown_before=grown_before,
+            sample_id=sample_id,
+            label=label,
+            **criteria,
+        )
         return self._paged_search("samples/search", body, page_size=page_size)
+
+    def sample_stats(
+        self,
+        *,
+        syn_instrument: str | None = None,
+        syn_technique: str | None = None,
+        char_instrument: str | None = None,
+        char_technique: str | None = None,
+        materials: list[int] | None = None,
+        material_names: list[str] | None = None,
+        elements: list[str] | None = None,
+        grown_after: str | date | datetime | None = None,
+        grown_before: str | date | datetime | None = None,
+        sample_id: str | None = None,
+        label: str | None = None,
+        **criteria: Any,
+    ) -> list[dict[str, Any]]:
+        """
+        POST /api/v{n}/sample-stat — aggregated sample statistics for the filter.
+
+        Uses the same SampleSearchCriteria filters as :meth:`find_samples` (no paging).
+        Each row includes counts plus technique / instrument / faculty / researcher /
+        substrate / status / materials and characterization breakdowns.
+        Requires the SampleStatistics privilege on the LiST side.
+        """
+        body = _sample_search_body(
+            syn_instrument=syn_instrument,
+            syn_technique=syn_technique,
+            char_instrument=char_instrument,
+            char_technique=char_technique,
+            materials=materials,
+            material_names=material_names,
+            elements=elements,
+            grown_after=grown_after,
+            grown_before=grown_before,
+            sample_id=sample_id,
+            label=label,
+            **criteria,
+        )
+        data = self.post("sample-stat", json=body)
+        if data is None:
+            return []
+        if not isinstance(data, list):
+            raise ValueError(f"Expected list from sample_stats, got {type(data)}")
+        return data
 
     def create_sample(self, **fields: Any) -> dict[str, Any]:
         """
@@ -639,6 +663,60 @@ class Client:
             return data
         self._raise(resp, "POST sample-import")
         raise AssertionError("unreachable")
+
+
+def _sample_search_body(
+    *,
+    syn_instrument: str | None = None,
+    syn_technique: str | None = None,
+    char_instrument: str | None = None,
+    char_technique: str | None = None,
+    materials: list[int] | None = None,
+    material_names: list[str] | None = None,
+    elements: list[str] | None = None,
+    grown_after: str | date | datetime | None = None,
+    grown_before: str | date | datetime | None = None,
+    sample_id: str | None = None,
+    label: str | None = None,
+    **criteria: Any,
+) -> dict[str, Any]:
+    """Build SampleSearchCriteria JSON body (shared by find_samples and sample_stats)."""
+    body: dict[str, Any] = {}
+
+    if syn_instrument is not None:
+        body["instrumentId"] = syn_instrument
+    if syn_technique is not None:
+        body["techniqueId"] = syn_technique
+    if char_instrument is not None:
+        body["characterizationInstrumentId"] = char_instrument
+    if char_technique is not None:
+        body["characterizationTechniqueId"] = char_technique
+
+    if materials is not None:
+        body["materials"] = list(materials)
+    if material_names is not None:
+        body["materialNames"] = list(material_names)
+    if elements is not None:
+        body["elements"] = list(elements)
+
+    if grown_after is not None:
+        body["grownAfter"] = _as_iso(grown_after)
+    if grown_before is not None:
+        body["grownBefore"] = _as_iso(grown_before)
+
+    label_val = sample_id or label
+    if label_val is not None:
+        body["sampleLabel"] = label_val
+
+    for key, value in criteria.items():
+        if value is None:
+            continue
+        if key == "search_kind":
+            body["kind"] = value
+        else:
+            body[key] = _as_iso(value) if isinstance(value, (date, datetime)) else value
+
+    return body
 
 
 def _as_iso(value: str | date | datetime) -> str:

@@ -7,5 +7,6 @@ Leave api_key = None to sign in via browser (Microsoft account).
 To obtain an API key: LiST web app → About → FAQ → contact that instance's data manager.
 """
 
-url = "https://your-list-host/dotnet"  # same base URL as in the browser
+# Public production LiST. Swap for a staging host or another instance if needed.
+url = "https://list.2dccmip.org/list/dotnet"
 api_key = None
