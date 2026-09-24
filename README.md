@@ -242,28 +242,10 @@ python examples/pipeline_create.py
 
 ## MCP server (optional)
 
+Expose LiST to **Cursor** or **Claude Desktop** via stdio MCP (sign in once, then read tools).
+
+**Setup guide (install from GitHub, venv paths, both hosts):** [docs/MCP.md](docs/MCP.md)
+
 ```bash
 pip install "listapi[mcp] @ git+https://github.com/psu-2dcc/list-api-client.git"
-listapi-mcp
-# or: python -m listapi.mcp_server
 ```
-
-Signs in once at process start (`sign_in()`), then exposes read tools: `find_samples`, `sample_stats`, `get_sample`, `activities`, `files`, `file_bytes`, `find_data_packages`, `api_get`. Logs go to **stderr** only.
-
-Cursor / Claude Desktop example:
-
-```json
-{
-  "mcpServers": {
-    "listapi": {
-      "command": "listapi-mcp",
-      "env": {
-        "LIST_URL": "https://list.2dccmip.org/list/dotnet",
-        "LIST_API_KEY": "your-key"
-      }
-    }
-  }
-}
-```
-
-Omit `LIST_API_KEY` to use Entra at startup (`LIST_ENTRA_MODE=device` if no browser).
