@@ -110,7 +110,7 @@ def main() -> int:
     return 0
 ```
 
-Search → stats → one sample → activities → files is the usual read path. Repo examples: `examples/analyze_sample.py`, `examples/find_samples.py`, `examples/sample_stats.py`.
+Search → stats → one sample (or `query_activities` for many) → activities → files is the usual read path. Repo examples: `examples/analyze_sample.py`, `examples/find_samples.py`, `examples/sample_stats.py`.
 
 ---
 
@@ -175,11 +175,28 @@ stats = client.sample_stats(syn_instrument="MBE2", grown_after="2026-01-01")
 
 | Method | Notes |
 |--------|--------|
+| `query_activities(samples, *, processing_types=None, char_techniques=None, char_instruments=None)` | `POST samples/activities/query` — activities, recipes and file metadata for many samples in one call (see below) |
 | `activities(sample, *, kind=None, instrument=None, technique=None, date=None, after=None, before=None)` | List + client-side filter. `kind`: `syn` \| `char` \| `split` |
 | `get_sample_activities(sample)` | Raw list |
 | `get_sample_activity(activity)` | One activity by id |
 | `add_activity(sample, *, kind, instrument=None, technique=None, date=None, description=None, **fields)` | `kind`: `syn` or `char` |
 | `update_sample_activity(activity, body, *, user_has_confirmed=False)` | PUT |
+
+**Bulk query** — search, then fetch detailed activities for all hits at once instead of one `activities()` call per sample:
+
+```python
+samples = client.find_samples(syn_instrument="MBE2", grown_after="2026-01-01")
+rows = client.query_activities(
+    samples,                                  # sample dicts or numeric ids
+    processing_types=["SYN"],                 # PREP | SYN | POST
+    char_techniques=["XRD"],                  # optional
+    char_instruments=["XRD1"],                # optional; must belong to char_techniques if both given
+)
+for row in rows:                              # {"sampleId", "sampleLabel", "activities": [...]}
+    print(row["sampleLabel"], len(row["activities"]))
+```
+
+At least one of the three filters is required. Filters are independent (characterization technique + instrument use AND; contradictory combinations raise `ListApiError` 400). Samples that are unknown or unreadable are omitted; readable samples with no match get `activities == []`. Activities include recipes and file metadata (names, types, download URLs) but never file content — use `file_bytes` / `download`. Requests over 100 samples are split automatically.
 
 ### Files
 

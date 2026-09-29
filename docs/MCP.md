@@ -14,6 +14,7 @@ At start the process calls `sign_in()` once (API key from env, or Entra if no ke
 | `sample_stats` | Aggregated statistics for the same filters |
 | `get_sample` | One sample by label or id |
 | `activities` | Activities for a sample (`syn` / `char` / `split`) |
+| `query_activities` | Activities + recipes for many samples at once (filter by processing type / char technique / instrument) |
 | `files` | File metadata for an activity |
 | `file_bytes` | File content as base64 (size-capped) |
 | `find_data_packages` | Data-package search |

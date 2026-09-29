@@ -6,7 +6,7 @@ import logging
 import mimetypes
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Iterable
 from urllib.parse import urljoin
 
 import requests
@@ -17,6 +17,7 @@ from listapi.errors import ListApiError
 logger = logging.getLogger(__name__)
 
 _DEFAULT_PAGE_SIZE = 100
+_ACTIVITY_QUERY_MAX_SAMPLES = 100
 
 
 class Client:
@@ -229,6 +230,55 @@ class Client:
         if not isinstance(data, list):
             raise ValueError(f"Expected list from sample_stats, got {type(data)}")
         return data
+
+    def query_activities(
+        self,
+        samples: Iterable[int | str | dict[str, Any]],
+        *,
+        processing_types: list[str] | None = None,
+        char_techniques: list[str] | None = None,
+        char_instruments: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        POST /api/v{n}/samples/activities/query — activities and recipes for many samples.
+
+        Use :meth:`find_samples` for discovery, then pass the results (sample dicts or
+        numeric ids). Returns one row per readable sample:
+        ``{"sampleId", "sampleLabel", "activities": [...]}`` with full activity
+        associations, recipes and file metadata (never file content; download via
+        :meth:`file_bytes`). Unknown / unreadable samples are omitted; a sample with no
+        matching activity has an empty ``activities`` list.
+
+        At least one filter is required (else the server returns 400):
+
+        - ``processing_types``: any of ``PREP``, ``SYN``, ``POST``
+        - ``char_techniques`` / ``char_instruments``: characterization technique /
+          instrument ids. Combined with AND; each instrument must belong to one of the
+          techniques, otherwise the server returns 400.
+
+        The server accepts at most 100 samples per call; larger inputs are split into
+        several requests and the results concatenated.
+        """
+        sample_ids = list(
+            dict.fromkeys(ids.sample_numeric_id(s) for s in samples)
+        )
+        body: dict[str, Any] = {}
+        if processing_types is not None:
+            body["processingTypes"] = [t.strip().upper() for t in processing_types]
+        if char_techniques is not None:
+            body["characterizationTechniqueIds"] = list(char_techniques)
+        if char_instruments is not None:
+            body["characterizationInstrumentIds"] = list(char_instruments)
+
+        results: list[dict[str, Any]] = []
+        for i in range(0, len(sample_ids), _ACTIVITY_QUERY_MAX_SAMPLES):
+            chunk = sample_ids[i : i + _ACTIVITY_QUERY_MAX_SAMPLES]
+            data = self.post("samples/activities/query", json={**body, "sampleIds": chunk})
+            if not isinstance(data, dict):
+                raise ValueError(f"Expected object from query_activities, got {type(data)}")
+            rows = data.get("samples") or data.get("Samples") or []
+            results.extend(row for row in rows if isinstance(row, dict))
+        return results
 
     def create_sample(self, **fields: Any) -> dict[str, Any]:
         """

@@ -133,6 +133,27 @@ def main() -> None:
         return _json(rows)
 
     @mcp.tool()
+    def query_activities(
+        sample_ids: list[int],
+        processing_types: list[str] | None = None,
+        char_techniques: list[str] | None = None,
+        char_instruments: list[str] | None = None,
+    ) -> str:
+        """Activities, recipes and file metadata for many samples (numeric ids, e.g. from
+        find_samples). Give at least one of processing_types (PREP | SYN | POST),
+        char_techniques, char_instruments."""
+        try:
+            rows = client.query_activities(
+                sample_ids,
+                processing_types=processing_types,
+                char_techniques=char_techniques,
+                char_instruments=char_instruments,
+            )
+        except ListApiError as exc:
+            return _json({"error": str(exc)})
+        return _json(rows)
+
+    @mcp.tool()
     def get_sample(sample: str) -> str:
         """Fetch one sample by label or numeric id."""
         try:
