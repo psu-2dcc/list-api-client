@@ -34,6 +34,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         client = sign_in()
+        print(client.whoami_str())
+
+
+
         rows = client.find_samples(
             syn_instrument=args.syn_instrument,
             syn_technique=args.syn_technique,

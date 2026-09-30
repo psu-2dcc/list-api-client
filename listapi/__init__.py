@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
-from listapi.auth import sign_in
+from listapi.auth import sign_in, sign_in_api_key, sign_in_entra, sign_in_shibboleth
 from listapi.client import Client
 from listapi.errors import ListApiError
 from listapi.import_status import (
@@ -36,6 +36,9 @@ __all__ = [
     "Client",
     "ListApiError",
     "sign_in",
+    "sign_in_api_key",
+    "sign_in_entra",
+    "sign_in_shibboleth",
     "__version__",
     "STATUS_INCOMPLETE",
     "STATUS_ERROR",

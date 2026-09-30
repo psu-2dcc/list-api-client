@@ -82,9 +82,14 @@ client = sign_in(url="https://list.2dccmip.org/list/dotnet", api_key="…")
 | Mode | When |
 |------|------|
 | **API key** | Non-empty key from arg / `LIST_API_KEY` / config. Calls `POST /auth/jwt/api`, then sends `X-API-Key` (and Bearer JWT when obtained) on **every** request. |
-| **Entra** | No API key. Needs `listapi[entra]`. Browser by default; `sign_in(entra="device")` or `LIST_ENTRA_MODE=device` for SSH. MSAL cache: `~/.list/msal_cache.bin`. |
+| **Entra** | No API key, `method="entra"` (default) or `LIST_AUTH_METHOD=entra`. Needs `listapi[entra]`. Browser by default; `sign_in(entra="device")` or `LIST_ENTRA_MODE=device` for SSH. MSAL cache: `~/.list/msal_cache.bin`. |
+| **Shibboleth** | No API key, `method="shibboleth"` or `LIST_AUTH_METHOD=shibboleth`. Opens a browser to your institution's login (silent if you already have a campus session); needs a LiST server with the `auth/shibboleth-cli` / `auth/jwt/shib` endpoints. |
 
-After sign-in: `client.base_url`, `client.api_key`, `client.jwt` (may be `None`), default `client.api_version == 2`. Failures raise **`ListApiError`** (`status_code` 401 / 403 / 404 / …).
+To force one method regardless of env/config, call `sign_in_api_key(url, api_key)`, `sign_in_entra(url, entra_mode=...)` or `sign_in_shibboleth(url)` directly instead of `sign_in()`.
+
+However you signed in, the JWT is refreshed for you: `client.refresh()` exchanges a still-valid JWT for a new one via `POST auth/jwt/api`, and `Client.request` does this automatically (proactively near expiry, and once on a 401) — a long script generally never has to re-run sign-in.
+
+After sign-in: `client.base_url`, `client.api_key`, `client.jwt` (may be `None`), `client.jwt_expiration` (server-set, may be `None`), default `client.api_version == 2`. Failures raise **`ListApiError`** (`status_code` 401 / 403 / 404 / …).
 
 **API key source for humans:** LiST web → **About → FAQ** → ask that instance’s data manager.
 
@@ -122,8 +127,13 @@ Public imports: `from listapi import sign_in, Client, ListApiError` (plus import
 
 | Symbol | Role |
 |--------|------|
-| `sign_in(*, url=None, api_key=…, api_version=2, entra=None)` | Build authenticated `Client` |
-| `Client(base_url, api_key=None, jwt=None, api_version=2)` | Direct construction if you already have credentials |
+| `sign_in(*, url=None, api_key=…, api_version=2, method=None, entra=None)` | Build authenticated `Client`, picking API key / Entra / Shibboleth |
+| `sign_in_api_key(url, api_key, *, api_version=2)` | Force API-key sign-in |
+| `sign_in_entra(url, *, api_version=2, entra_mode="interactive")` | Force Entra sign-in |
+| `sign_in_shibboleth(url, *, api_version=2, timeout_sec=120)` | Force Shibboleth sign-in |
+| `Client(base_url, api_key=None, jwt=None, api_version=2, jwt_expiration=None)` | Direct construction if you already have credentials |
+| `client.refresh()` | Exchange the current JWT for a new one (`POST auth/jwt/api`); returns `False` if there's nothing to refresh or it fails |
+| `client.whoami()` | `GET api/v1/users/current` — `Id`, `Login`, `Eppn`, `AuthMethod` (`msal`/`shibboleth`/absent), roles, etc. for whoever is actually signed in |
 
 ### Generic HTTP (any Swagger route)
 
@@ -215,6 +225,15 @@ At least one of the three filters is required. Filters are independent (characte
 |--------|--------|
 | `get_data_package(id_or_doi)` | |
 | `find_data_packages(**criteria)` | Auto-paged search; camelCase criteria from Swagger |
+
+### Publications
+
+| Method | Notes |
+|--------|--------|
+| `list_publications()` | Every publication you can read |
+| `get_publication(id_or_doi)` | Numeric id or DOI |
+| `find_publications(*, search_text=None, elements=None, materials=None, publication_type=None, science_driver=None)` | Auto-paged search; `publication_type` is `"I"` / `"E"` / `"L"` |
+| `get_publication_data_packages(id_or_doi)` | Data packages attached to a publication |
 
 ### Sample import (automation)
 

@@ -236,6 +236,45 @@ def main() -> None:
         )
 
     @mcp.tool()
+    def find_publications(
+        search_text: str | None = None,
+        elements: list[str] | None = None,
+        publication_type: str | None = None,
+        limit: int = _DEFAULT_FIND_LIMIT,
+    ) -> str:
+        """
+        Search publications by free text and/or element symbols (e.g. ["Mo","S"]).
+        publication_type: "I" (in-house), "E" (external user), "L" (local user).
+        With no filters, returns all readable publications.
+        """
+        try:
+            rows = client.find_publications(
+                search_text=search_text,
+                elements=elements,
+                publication_type=publication_type,
+            )
+        except ListApiError as exc:
+            return _json({"error": str(exc)})
+        truncated = rows[: max(1, limit)]
+        return _json(
+            {
+                "total": len(rows),
+                "returned": len(truncated),
+                "publications": truncated,
+            }
+        )
+
+    @mcp.tool()
+    def get_publication(id_or_doi: str) -> str:
+        """One publication by numeric id or DOI, plus its data packages."""
+        try:
+            pub = client.get_publication(id_or_doi)
+            pub["dataPackages"] = client.get_publication_data_packages(id_or_doi)
+        except ListApiError as exc:
+            return _json({"error": str(exc)})
+        return _json(pub)
+
+    @mcp.tool()
     def api_get(path: str) -> str:
         """GET any /api/v{n}/ path relative to the client (e.g. 'projects')."""
         try:

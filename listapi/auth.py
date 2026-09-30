@@ -1,16 +1,25 @@
-"""Sign in to LiST: API key and/or Microsoft Entra (MSAL) → LiST JWT."""
+"""Sign in to LiST: API key, Microsoft Entra (MSAL), or Shibboleth → LiST JWT.
+
+Three explicit, single-purpose entry points do the actual work:
+``sign_in_api_key``, ``sign_in_entra``, ``sign_in_shibboleth``. ``sign_in()``
+is a convenience wrapper that resolves config/env and picks one of them, so
+callers who don't care which method is used (and want it to stay silent when
+already signed in to Entra or to the campus SP) can just call ``sign_in()``.
+"""
 
 from __future__ import annotations
 
+import http.server
 import logging
 import os
+import secrets
 import threading
+import webbrowser
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urljoin, urlparse
 
-import requests
-
+from listapi._jwt import post_for_jwt
 from listapi.client import Client
 from listapi.config import load_list_config
 
@@ -18,13 +27,15 @@ logger = logging.getLogger(__name__)
 
 MSAL_CACHE_PATH = Path.home() / ".list" / "msal_cache.bin"
 
-# Interactive MSAL opens a browser and blocks on a localhost redirect. Closing the
-# window does not cancel that wait — use a timeout, then fall back to device code.
+# Interactive MSAL / Shibboleth open a browser and block on a localhost redirect.
+# Closing the window does not cancel that wait — use a timeout, then fall back
+# (device code for Entra; a hard error for Shibboleth, there is no headless mode).
 _INTERACTIVE_TIMEOUT_SEC = 120
 
 _UNSET = object()
 
 EntraMode = Literal["device", "interactive", "auto"]
+AuthMethod = Literal["api_key", "entra", "shibboleth"]
 
 
 def sign_in(
@@ -32,20 +43,23 @@ def sign_in(
     url: str | None = None,
     api_key: Any = _UNSET,
     api_version: int = 2,
+    method: AuthMethod | None = None,
     entra: EntraMode | None = None,
 ) -> Client:
     """
-    Build an authenticated :class:`Client`.
+    Build an authenticated :class:`Client`, picking a sign-in method automatically.
 
     Config: ``config/list.py`` (override directory with ``LIST_CONFIG_DIR``).
-    Env: ``LIST_URL``, ``LIST_API_KEY`` fill gaps when not passed explicitly.
+    Env: ``LIST_URL``, ``LIST_API_KEY``, ``LIST_AUTH_METHOD`` fill gaps when not
+    passed explicitly.
 
     - If ``api_key`` is a non-empty string (arg, env, or config): ``X-API-Key``,
       then try ``POST /auth/jwt/api`` for a LiST JWT; on failure keep the key.
-    - If ``api_key`` is ``None``: Entra **browser** login by default (needs Entra
-      Mobile/desktop ``http://localhost`` + Allow public client flows). Times out
-      after 2 minutes if the window is closed, then offers device code. Use
-      ``entra="device"`` or ``LIST_ENTRA_MODE=device`` to skip the browser.
+    - Otherwise, ``method`` (or ``LIST_AUTH_METHOD``) picks ``"entra"`` (default)
+      or ``"shibboleth"``. Both are silent when you're already signed in
+      (an Entra silent-token cache, or an existing campus SP session) and only
+      prompt when they're not. Use :func:`sign_in_entra` / :func:`sign_in_shibboleth`
+      directly if you want to force one without going through this resolver.
     """
     cfg_url: str | None = None
     cfg_key: str | None = None
@@ -74,10 +88,26 @@ def sign_in(
         resolved_key = None if api_key in (None, "") else str(api_key)
 
     if resolved_key:
-        return _sign_in_with_api_key(resolved_url, resolved_key, api_version=api_version)
+        return sign_in_api_key(resolved_url, resolved_key, api_version=api_version)
 
+    resolved_method = _resolve_auth_method(method)
+    if resolved_method == "shibboleth":
+        return sign_in_shibboleth(resolved_url, api_version=api_version)
     mode = _resolve_entra_mode(entra)
-    return _sign_in_with_entra(resolved_url, api_version=api_version, entra_mode=mode)
+    return sign_in_entra(resolved_url, api_version=api_version, entra_mode=mode)
+
+
+def _resolve_auth_method(method: AuthMethod | None) -> Literal["entra", "shibboleth"]:
+    if method is not None:
+        if method == "api_key":
+            raise ValueError(
+                "method='api_key' has no url; call sign_in_api_key(url, key) directly"
+            )
+        return method
+    env = (os.environ.get("LIST_AUTH_METHOD") or "").strip().lower()
+    if env == "shibboleth":
+        return "shibboleth"
+    return "entra"
 
 
 def _resolve_entra_mode(entra: EntraMode | None) -> EntraMode:
@@ -90,132 +120,145 @@ def _resolve_entra_mode(entra: EntraMode | None) -> EntraMode:
     return "interactive"
 
 
-def _sign_in_with_api_key(base_url: str, api_key: str, *, api_version: int) -> Client:
-    jwt = _exchange_list_jwt(base_url, api_key=api_key, azure_bearer=None)
+def sign_in_api_key(base_url: str, api_key: str, *, api_version: int = 2) -> Client:
+    """Sign in with a LiST API key, exchanging it for a JWT when possible."""
+    base_url = base_url.rstrip("/")
+    jwt, expiration = post_for_jwt(base_url, "auth/jwt/api", api_key=api_key)
     if jwt:
-        return Client(base_url, api_key=api_key, jwt=jwt, api_version=api_version)
+        return Client(
+            base_url, api_key=api_key, jwt=jwt, api_version=api_version, jwt_expiration=expiration
+        )
     logger.warning("POST /auth/jwt/api failed; continuing with X-API-Key only")
     return Client(base_url, api_key=api_key, jwt=None, api_version=api_version)
 
 
-def _sign_in_with_entra(
+def sign_in_entra(
     base_url: str,
     *,
-    api_version: int,
-    entra_mode: EntraMode = "device",
+    api_version: int = 2,
+    entra_mode: EntraMode = "interactive",
 ) -> Client:
+    """
+    Sign in via Microsoft Entra (MSAL) and exchange the Azure token for a LiST JWT.
+
+    Needs Entra Mobile/desktop ``http://localhost`` + "Allow public client flows"
+    for the interactive browser mode. Times out after 2 minutes if the window is
+    closed, then falls back to device code. Pass ``entra_mode="device"`` to skip
+    the browser outright.
+    """
+    base_url = base_url.rstrip("/")
     azure_token = _acquire_entra_token(base_url, entra_mode=entra_mode)
     print("Entra sign-in OK; exchanging Azure token for LiST JWT…", flush=True)
-    jwt = _exchange_list_jwt(
-        base_url, api_key=None, azure_bearer=azure_token, raise_on_error=True
+    jwt, expiration = post_for_jwt(
+        base_url, "auth/jwt/api", bearer=azure_token, raise_on_error=True
     )
     if not jwt:
         raise RuntimeError(
             "Entra sign-in succeeded but POST /auth/jwt/api did not return a LiST JWT."
         )
     print("LiST JWT acquired.", flush=True)
-    return Client(base_url, api_key=None, jwt=jwt, api_version=api_version)
+    return Client(
+        base_url, api_key=None, jwt=jwt, api_version=api_version, jwt_expiration=expiration
+    )
 
 
-def _exchange_list_jwt(
+def sign_in_shibboleth(
     base_url: str,
     *,
-    api_key: str | None,
-    azure_bearer: str | None,
-    raise_on_error: bool = False,
-) -> str | None:
-    """POST /auth/jwt/api → LiST JWT string, or None on failure."""
-    url = urljoin(base_url + "/", "auth/jwt/api")
-    headers: dict[str, str] = {"Accept": "application/json"}
-    if api_key:
-        headers["X-API-Key"] = api_key
-    if azure_bearer:
-        headers["Authorization"] = f"Bearer {azure_bearer}"
-    try:
-        # Do not send ambient cookies (browser AuthToken would block CanBypassAntiForgery).
-        resp = requests.post(url, headers=headers, timeout=60, cookies={})
-        if not resp.ok:
-            msg = _format_jwt_exchange_failure(url, resp, azure_bearer)
-            if raise_on_error:
-                raise RuntimeError(msg)
-            logger.debug("%s", msg)
-            return None
+    api_version: int = 2,
+    timeout_sec: float = _INTERACTIVE_TIMEOUT_SEC,
+) -> Client:
+    """
+    Sign in via the campus Shibboleth SP (InCommon) and exchange the result for a LiST JWT.
+
+    Opens a browser to ``{base_url}/auth/shibboleth-cli``, which is silent (no
+    prompt) if you already have a campus SP session, and otherwise redirects you
+    to your institution's login. The result comes back on a one-shot localhost
+    listener as a one-time code, which is exchanged server-side for a JWT via
+    ``POST /auth/jwt/shib`` — the code itself is never a usable credential.
+
+    Requires the server to have the ``auth/shibboleth-cli`` / ``auth/jwt/shib``
+    endpoints (not every LiST server does).
+    """
+    base_url = base_url.rstrip("/")
+    state = secrets.token_urlsafe(24)
+    code_box: dict[str, str] = {}
+    done = threading.Event()
+
+    class _CallbackHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_args: Any) -> None:  # silence default stderr logging
+            pass
+
+        def do_GET(self) -> None:  # noqa: N802 (stdlib method name)
+            parsed = urlparse(self.path)
+            if parsed.path != "/callback":
+                self.send_response(404)
+                self.end_headers()
+                return
+            params = parse_qs(parsed.query)
+            got_state = (params.get("state") or [""])[0]
+            code = (params.get("code") or [""])[0]
+            error = (params.get("error") or [""])[0]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            if error:
+                self.wfile.write(
+                    f"<html><body>Shibboleth sign-in failed: {error}. "
+                    "You can close this tab.</body></html>".encode()
+                )
+            elif got_state != state or not code:
+                self.wfile.write(
+                    b"<html><body>Sign-in response did not match this request "
+                    b"(possible tampering) - rejected. You can close this tab.</body></html>"
+                )
+            else:
+                code_box["code"] = code
+                self.wfile.write(
+                    b"<html><body>Signed in. You can close this tab.</body></html>"
+                )
+            done.set()
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _CallbackHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.handle_request, daemon=True)
+    thread.start()
+
+    login_url = urljoin(base_url + "/", "auth/shibboleth-cli") + f"?port={port}&state={state}"
+    print(
+        "Opening a browser for Shibboleth (InCommon) sign-in.\n"
+        "If you already have a campus session this should complete without a prompt.\n"
+        f"Waiting up to {timeout_sec:.0f}s. Ctrl+C to cancel.",
+        flush=True,
+    )
+    webbrowser.open(login_url)
+
+    thread.join(timeout=timeout_sec)
+    if not done.is_set():
         try:
-            data = resp.json()
-        except ValueError:
-            data = resp.text.strip().strip('"')
-        if isinstance(data, str) and data:
-            return data
-        if isinstance(data, dict):
-            token = data.get("token") or data.get("access_token") or data.get("jwt")
-            if isinstance(token, str) and token:
-                return token
-        msg = (
-            f"POST {url} returned {resp.status_code} but body was not a JWT string.\n"
-            f"  Content-Type: {resp.headers.get('Content-Type')!r}\n"
-            f"  Body: {resp.text[:500]!r}"
+            server.server_close()
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"Shibboleth sign-in timed out after {timeout_sec:.0f}s "
+            "(browser closed, or the server has no auth/shibboleth-cli endpoint)."
         )
-        if raise_on_error:
-            raise RuntimeError(msg)
-        logger.debug("%s", msg)
-        return None
-    except RuntimeError:
-        raise
-    except requests.RequestException as exc:
-        msg = f"POST {url} request error: {exc}"
-        if raise_on_error:
-            raise RuntimeError(msg) from exc
-        logger.debug("%s", msg)
-        return None
 
+    code = code_box.get("code")
+    if not code:
+        raise RuntimeError("Shibboleth sign-in was rejected or returned no code; see browser tab.")
 
-def _format_jwt_exchange_failure(
-    url: str,
-    resp: requests.Response,
-    azure_bearer: str | None,
-) -> str:
-    """Human-readable failure for POST /auth/jwt/api (status, body, Azure token claims)."""
-    lines = [
-        f"POST {url} failed with HTTP {resp.status_code}",
-        f"  Reason: {resp.reason}",
-        f"  Content-Type: {resp.headers.get('Content-Type')!r}",
-    ]
-    body = (resp.text or "").strip()
-    if body:
-        lines.append(f"  Response body:\n{body[:1200]}")
-    else:
-        lines.append("  Response body: (empty)")
-    if azure_bearer:
-        lines.append(_azure_token_hint(azure_bearer).lstrip("\n") or "  Azure token: (could not decode)")
-        lines.append(
-            "  Note: React uses GET /auth/jwt/app with the same Azure bearer; "
-            "compare aud/iss/scp above to a working browser token if this keeps failing."
+    jwt, expiration = post_for_jwt(
+        base_url, "auth/jwt/shib", json_body={"code": code}, raise_on_error=True
+    )
+    if not jwt:
+        raise RuntimeError(
+            "Shibboleth sign-in succeeded but POST /auth/jwt/shib did not return a LiST JWT."
         )
-    return "\n".join(lines)
-
-
-def _azure_token_hint(azure_bearer: str) -> str:
-    """Decode JWT payload claims for debugging (no signature check)."""
-    try:
-        import base64
-        import json
-
-        parts = azure_bearer.split(".")
-        if len(parts) < 2:
-            return "  Azure token: not a JWT"
-        pad = "=" * (-len(parts[1]) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(parts[1] + pad))
-        return (
-            "  Azure access token claims:\n"
-            f"    aud = {payload.get('aud')!r}\n"
-            f"    iss = {payload.get('iss')!r}\n"
-            f"    scp = {payload.get('scp')!r}\n"
-            f"    appid / azp = {payload.get('appid') or payload.get('azp')!r}\n"
-            f"    upn / preferred_username = "
-            f"{payload.get('upn') or payload.get('preferred_username')!r}"
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"  Azure token: decode failed ({exc})"
+    print("LiST JWT acquired.", flush=True)
+    return Client(
+        base_url, api_key=None, jwt=jwt, api_version=api_version, jwt_expiration=expiration
+    )
 
 
 def _acquire_entra_token(base_url: str, *, entra_mode: EntraMode = "device") -> str:
@@ -348,6 +391,8 @@ def _acquire_token_device_code(app: Any, scopes: list[str]) -> dict[str, Any] | 
 
 
 def _fetch_msal_config(base_url: str) -> dict[str, Any]:
+    import requests
+
     url = urljoin(base_url + "/", "api/v1/system-config")
     resp = requests.get(url, timeout=60)
     resp.raise_for_status()

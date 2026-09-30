@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import mimetypes
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable
 from urllib.parse import urljoin
@@ -12,6 +12,7 @@ from urllib.parse import urljoin
 import requests
 
 from listapi import ids
+from listapi._jwt import post_for_jwt
 from listapi.errors import ListApiError
 
 logger = logging.getLogger(__name__)
@@ -19,9 +20,21 @@ logger = logging.getLogger(__name__)
 _DEFAULT_PAGE_SIZE = 100
 _ACTIVITY_QUERY_MAX_SAMPLES = 100
 
+# Refresh proactively once the JWT is this close to expiring, rather than
+# waiting to be turned away with a 401.
+_REFRESH_MARGIN_SEC = 60
+
 
 class Client:
-    """Session-backed LiST API client (Bearer JWT and/or X-API-Key)."""
+    """Session-backed LiST API client (Bearer JWT and/or X-API-Key).
+
+    The JWT's lifetime is set by the server (``X-Token-Expiration`` on
+    sign-in/refresh), not fixed here. However it was obtained — API key,
+    Entra, or Shibboleth — ``POST auth/jwt/api`` with the current JWT as a
+    bearer token returns a fresh one while the old one is still valid; see
+    :meth:`refresh`. ``request`` calls this proactively near expiry and once
+    on a 401, so a long-lived script generally never has to re-run sign-in.
+    """
 
     def __init__(
         self,
@@ -29,17 +42,45 @@ class Client:
         api_key: str | None = None,
         jwt: str | None = None,
         api_version: int = 2,
+        jwt_expiration: datetime | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.jwt = jwt
         self.api_version = api_version
+        self.jwt_expiration = jwt_expiration
         self._session = requests.Session()
         if jwt:
             self._session.headers["Authorization"] = f"Bearer {jwt}"
         if api_key:
             self._session.headers["X-API-Key"] = api_key
         self._session.headers.setdefault("Accept", "application/json")
+
+    def refresh(self) -> bool:
+        """
+        Exchange the current JWT for a new one via ``POST auth/jwt/api``.
+
+        Works regardless of how the original JWT was obtained (API key, Entra,
+        or Shibboleth) as long as it hasn't expired yet. Returns ``False``
+        (leaving the client's JWT untouched) if there is no JWT to refresh or
+        the exchange fails; callers needing a hard failure should re-run the
+        original sign-in instead.
+        """
+        if not self.jwt:
+            return False
+        token, expiration = post_for_jwt(self.base_url, "auth/jwt/api", bearer=self.jwt)
+        if not token:
+            return False
+        self.jwt = token
+        self.jwt_expiration = expiration
+        self._session.headers["Authorization"] = f"Bearer {token}"
+        return True
+
+    def _jwt_near_expiry(self) -> bool:
+        if not self.jwt or not self.jwt_expiration:
+            return False
+        remaining = (self.jwt_expiration - datetime.now(timezone.utc)).total_seconds()
+        return remaining <= _REFRESH_MARGIN_SEC
 
     # -- URL helpers ----------------------------------------------------------
 
@@ -61,8 +102,13 @@ class Client:
         timeout: float = 120,
         **kwargs: Any,
     ) -> requests.Response:
+        if self._jwt_near_expiry():
+            self.refresh()
         logger.debug("%s %s", method.upper(), url)
         resp = self._session.request(method, url, timeout=timeout, **kwargs)
+        if resp.status_code == 401 and self.jwt and self.refresh():
+            logger.debug("401 on %s %s; refreshed JWT and retrying once", method.upper(), url)
+            resp = self._session.request(method, url, timeout=timeout, **kwargs)
         return resp
 
     def _raise(self, resp: requests.Response, what: str) -> None:
@@ -104,6 +150,29 @@ class Client:
             return resp.json()
         except ValueError:
             return resp
+
+    def whoami(self) -> dict[str, Any]:
+        """
+        ``GET api/v1/users/current`` — who the server thinks signed you in.
+
+        Includes ``Id``, ``Login``, ``Eppn``, ``AuthMethod`` (``"msal"``,
+        ``"shibboleth"``, or absent for anonymous/API-key access), name, roles
+        and more. Works with any auth (JWT, API key, or none — an anonymous
+        caller gets the community role back rather than an error).
+        """
+        return self.get("users/current", version=1)
+
+    def whoami_str(self) -> str:
+        """Human-readable summary of :meth:`whoami`."""
+        me = self.whoami()
+        first = me.get("firstName")
+        last = me.get("lastName")
+        eppn = me.get("eppn")
+
+        role_id = me.get("selectedRole")
+        role = next((r["name"] for r in me.get("roles", []) if r["id"] == role_id), None)
+
+        return f"{first} {last} <{eppn}> — role: {role} (auth: {me.get('authMethod')})"
 
     def get(self, path: str, **kwargs: Any) -> Any:
         """GET helper — see :meth:`request`."""
@@ -333,6 +402,56 @@ class Client:
         """POST /api/v{n}/data-packages/search — auto-page."""
         body = {k: v for k, v in criteria.items() if v is not None}
         return self._paged_search("data-packages/search", body, page_size=page_size)
+
+    # -- Publications ---------------------------------------------------------
+
+    def list_publications(self) -> list[dict[str, Any]]:
+        """GET /api/v{n}/publications — every publication the caller can read."""
+        data = self.get("publications")
+        if not isinstance(data, list):
+            raise ValueError(f"Expected list from list_publications, got {type(data)}")
+        return data
+
+    def get_publication(self, id_or_doi: str | int) -> dict[str, Any]:
+        """GET /api/v{n}/publications/by-id-or-doi?idOrDoi=… (DOI slashes need no escaping)."""
+        ref = str(id_or_doi)
+        data = self.get("publications/by-id-or-doi", params={"idOrDoi": ref})
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected object from get_publication, got {type(data)}")
+        return data
+
+    def find_publications(
+        self,
+        *,
+        search_text: str | None = None,
+        elements: Iterable[str] | None = None,
+        materials: Iterable[int] | None = None,
+        publication_type: str | None = None,
+        science_driver: int | None = None,
+        page_size: int = _DEFAULT_PAGE_SIZE,
+    ) -> list[dict[str, Any]]:
+        """
+        POST /api/v{n}/publications/search — auto-page.
+
+        ``publication_type`` is ``"I"`` (in-house), ``"E"`` (external user) or
+        ``"L"`` (local user); ``science_driver`` is an id from ``publications/science-drivers``.
+        """
+        body: dict[str, Any] = {
+            "searchText": search_text,
+            "elements": list(elements) if elements is not None else None,
+            "materials": list(materials) if materials is not None else None,
+            "publicationType": publication_type,
+            "scienceDriver": science_driver,
+        }
+        body = {k: v for k, v in body.items() if v is not None}
+        return self._paged_search("publications/search", body, page_size=page_size)
+
+    def get_publication_data_packages(self, id_or_doi: str | int) -> list[dict[str, Any]]:
+        """GET /api/v{n}/publications/data-packages?idOrDoi=…"""
+        data = self.get("publications/data-packages", params={"idOrDoi": str(id_or_doi)})
+        if not isinstance(data, list):
+            raise ValueError(f"Expected list from get_publication_data_packages, got {type(data)}")
+        return data
 
     def _paged_search(
         self,

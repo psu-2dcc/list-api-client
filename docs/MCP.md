@@ -6,7 +6,7 @@ Run **listapi** as an MCP server so an AI host can call LiST (search samples, st
 
 ## What you get
 
-At start the process calls `sign_in()` once (API key from env, or Entra if no key). Then these **read** tools are available:
+At start the process calls `sign_in()` once (API key from env, or Entra/Shibboleth if no key, per `LIST_AUTH_METHOD`). Then these **read** tools are available:
 
 | Tool | Purpose |
 |------|---------|
@@ -18,6 +18,8 @@ At start the process calls `sign_in()` once (API key from env, or Entra if no ke
 | `files` | File metadata for an activity |
 | `file_bytes` | File content as base64 (size-capped) |
 | `find_data_packages` | Data-package search |
+| `find_publications` | Publication search (text / elements / type) |
+| `get_publication` | One publication by id or DOI, with its data packages |
 | `api_get` | `GET` any `/api/v2/…` path |
 
 Full library API (scripts, writes, etc.): [README.md](../README.md).
@@ -66,8 +68,9 @@ pip install "listapi[entra,mcp] @ git+https://github.com/psu-2dcc/list-api-clien
 | Variable | Role |
 |----------|------|
 | `LIST_URL` | LiST base URL (default public: `https://list.2dccmip.org/list/dotnet`) |
-| `LIST_API_KEY` | API key (preferred for unattended MCP). Omit for Entra. |
-| `LIST_ENTRA_MODE` | `device` if no browser (SSH / headless) |
+| `LIST_API_KEY` | API key (preferred for unattended MCP). Omit for Entra/Shibboleth. |
+| `LIST_AUTH_METHOD` | `entra` (default) or `shibboleth`, when `LIST_API_KEY` is omitted |
+| `LIST_ENTRA_MODE` | `device` if no browser (SSH / headless); Entra only |
 
 Get a key: LiST web → **About → FAQ** → ask that instance’s data manager.
 
@@ -165,6 +168,19 @@ Omit `LIST_API_KEY` from `env`. On first start the process may open a browser or
 ```
 
 MSAL cache: `~/.list/msal_cache.bin`.
+
+---
+
+## 6. Shibboleth instead of an API key
+
+Omit `LIST_API_KEY` and set `LIST_AUTH_METHOD=shibboleth`. On first start the process opens a browser to your institution's login; this is silent if you already have a campus SP session. Requires a LiST server with the `auth/shibboleth-cli` / `auth/jwt/shib` endpoints — not every instance has these.
+
+```json
+"env": {
+  "LIST_URL": "https://list.2dccmip.org/list/dotnet",
+  "LIST_AUTH_METHOD": "shibboleth"
+}
+```
 
 ---
 
