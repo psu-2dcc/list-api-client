@@ -403,6 +403,20 @@ class Client:
         body = {k: v for k, v in criteria.items() if v is not None}
         return self._paged_search("data-packages/search", body, page_size=page_size)
 
+    # -- Projects -------------------------------------------------------------
+
+    def list_projects(self) -> list[dict[str, Any]]:
+        """
+        GET /api/v1/projects — every project the caller can read (v1 only).
+
+        Includes ``category``, the PI institution class: ``R1``, ``NR1``
+        (non-R1 academic), ``G`` (government), ``Ind``, ``Int``, ``O``.
+        """
+        data = self.get("projects", version=1)
+        if not isinstance(data, list):
+            raise ValueError(f"Expected list from list_projects, got {type(data)}")
+        return data
+
     # -- Publications ---------------------------------------------------------
 
     def list_publications(self) -> list[dict[str, Any]]:
@@ -428,6 +442,11 @@ class Client:
         materials: Iterable[int] | None = None,
         publication_type: str | None = None,
         science_driver: int | None = None,
+        date_from: str | date | None = None,
+        date_to: str | date | None = None,
+        work_type: str | None = None,
+        drafts_only: bool = False,
+        instrument_doi: str | None = None,
         page_size: int = _DEFAULT_PAGE_SIZE,
     ) -> list[dict[str, Any]]:
         """
@@ -435,6 +454,9 @@ class Client:
 
         ``publication_type`` is ``"I"`` (in-house), ``"E"`` (external user) or
         ``"L"`` (local user); ``science_driver`` is an id from ``publications/science-drivers``.
+        ``date_from`` / ``date_to`` are inclusive and take ``yyyy``, ``yyyy-MM`` or
+        ``yyyy-MM-dd`` (or a ``date``); ``work_type`` is a Crossref work type such as
+        ``"journal-article"``. ``drafts_only`` needs the publication update privilege.
         """
         body: dict[str, Any] = {
             "searchText": search_text,
@@ -442,9 +464,78 @@ class Client:
             "materials": list(materials) if materials is not None else None,
             "publicationType": publication_type,
             "scienceDriver": science_driver,
+            "dateFrom": date_from.isoformat() if isinstance(date_from, date) else date_from,
+            "dateTo": date_to.isoformat() if isinstance(date_to, date) else date_to,
+            "workType": work_type,
+            "draftsOnly": drafts_only or None,
+            "instrumentDoi": instrument_doi,
         }
         body = {k: v for k, v in body.items() if v is not None}
         return self._paged_search("publications/search", body, page_size=page_size)
+
+    def lookup_doi(self, doi: str, *, include_raw: bool = False) -> dict[str, Any]:
+        """
+        GET /api/v{n}/publications/doi-lookup — Crossref data for a DOI as a draft (nothing is saved).
+
+        Returns ``exists`` / ``publicationId``, ``draft`` (a create request: bibliographic
+        fields, authors linked to LiST users, suggested highlights; ``type`` unset),
+        ``warnings``, and for an existing publication ``fieldDiffs`` (``field``,
+        ``current``, ``proposed``, ``action`` = Apply / Report / Error, ``note``).
+        Raises :class:`ListApiError` with 404 when Crossref doesn't know the DOI.
+        """
+        params: dict[str, Any] = {"doi": doi}
+        if include_raw:
+            params["includeRaw"] = "true"
+        data = self.get("publications/doi-lookup", params=params)
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected object from lookup_doi, got {type(data)}")
+        return data
+
+    def create_publication(self, request: dict[str, Any]) -> dict[str, Any]:
+        """POST /api/v{n}/publications — ``request`` is a CreatePublicationRequest (``submit``: false = draft)."""
+        data = self.post("publications", json=request)
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected object from create_publication, got {type(data)}")
+        return data
+
+    def update_publication(self, request: dict[str, Any]) -> dict[str, Any]:
+        """PUT /api/v{n}/publications/{id} — ``request`` is a full UpdatePublicationRequest incl. ``id``."""
+        data = self.put(f"publications/{request['id']}", json=request)
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected object from update_publication, got {type(data)}")
+        return data
+
+    def mark_publication_synced(self, id_or_doi: str | int) -> dict[str, Any]:
+        """POST /api/v{n}/publications/{idOrDoi}/metadata-synced — metadata source = Crossref, synced now."""
+        data = self.post(f"publications/{id_or_doi}/metadata-synced")
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected object from mark_publication_synced, got {type(data)}")
+        return data
+
+    def render_publication(self, request: dict[str, Any]) -> dict[str, Any]:
+        """POST /api/v{n}/publications/render — server-rendered ``authors`` / ``cite`` preview."""
+        data = self.post("publications/render", json=request)
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected object from render_publication, got {type(data)}")
+        return data
+
+    def suggest_authors(
+        self,
+        authors: Iterable[dict[str, Any]],
+        *,
+        publication_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        POST /api/v{n}/publications/author-suggestions — match authors to LiST users, suggest highlights.
+
+        ``authors``: dicts with any of ``collaboratorId``, ``orcid``, ``given``, ``family``.
+        Returns one suggestion per author, in order (suggestions only; a human confirms).
+        """
+        body = {"publicationId": publication_id, "authors": list(authors)}
+        data = self.post("publications/author-suggestions", json=body)
+        if not isinstance(data, list):
+            raise ValueError(f"Expected list from suggest_authors, got {type(data)}")
+        return data
 
     def get_publication_data_packages(self, id_or_doi: str | int) -> list[dict[str, Any]]:
         """GET /api/v{n}/publications/data-packages?idOrDoi=…"""

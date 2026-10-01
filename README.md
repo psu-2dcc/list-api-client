@@ -226,14 +226,29 @@ At least one of the three filters is required. Filters are independent (characte
 | `get_data_package(id_or_doi)` | |
 | `find_data_packages(**criteria)` | Auto-paged search; camelCase criteria from Swagger |
 
+### Projects
+
+| Method | Notes |
+|--------|--------|
+| `list_projects()` | Every project you can read (API v1); `category` is the PI institution class (`R1`, `NR1`, `G`, `Ind`, `Int`, `O`) |
+
 ### Publications
 
 | Method | Notes |
 |--------|--------|
 | `list_publications()` | Every publication you can read |
 | `get_publication(id_or_doi)` | Numeric id or DOI |
-| `find_publications(*, search_text=None, elements=None, materials=None, publication_type=None, science_driver=None)` | Auto-paged search; `publication_type` is `"I"` / `"E"` / `"L"` |
+| `find_publications(*, search_text=None, elements=None, materials=None, publication_type=None, science_driver=None, date_from=None, date_to=None, work_type=None, drafts_only=False, instrument_doi=None)` | Auto-paged search; `publication_type` is `"I"` / `"E"` / `"L"`; dates as `yyyy[-MM[-dd]]` |
 | `get_publication_data_packages(id_or_doi)` | Data packages attached to a publication |
+| `lookup_doi(doi, *, include_raw=False)` | Crossref data as a draft (nothing saved); for existing publications `fieldDiffs` with Apply / Report / Error |
+| `create_publication(request)` / `update_publication(request)` | Create (`submit: false` = draft) / full update (`id` in the request) |
+| `mark_publication_synced(id_or_doi)` | Record that the metadata was just synced from Crossref |
+| `render_publication(request)` | Server-rendered `authors` / `cite` preview |
+| `suggest_authors(authors, *, publication_id=None)` | Match authors to LiST users, suggest highlights |
+
+`lookup_doi`, `mark_publication_synced`, `render_publication`, `suggest_authors` and the
+date / author / funding fields need a LiST server with the extended publication API
+(not on production yet).
 
 ### Sample import (automation)
 
