@@ -173,7 +173,7 @@ MSAL cache: `~/.list/msal_cache.bin`.
 
 ## 6. Shibboleth instead of an API key
 
-Omit `LIST_API_KEY` and set `LIST_AUTH_METHOD=shibboleth`. On first start the process opens a browser to your institution's login; this is silent if you already have a campus SP session. Requires a LiST server with the `auth/shibboleth-cli` / `auth/jwt/shib` endpoints — not every instance has these.
+Omit `LIST_API_KEY` and set `LIST_AUTH_METHOD=shibboleth`. On first start the process opens a browser to your institution's login if needed, then asks you to confirm the sign-in for the shown account and local port (click **Continue**; **Cancel** aborts). Requires a LiST server with the `auth/shibboleth-cli` / `auth/jwt/shib` endpoints — not every instance has these.
 
 ```json
 "env": {

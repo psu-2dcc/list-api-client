@@ -17,7 +17,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from listapi import ListApiError, sign_in  # noqa: E402
+from listapi import ListApiError  # noqa: E402
+from listapi.cli import add_auth_arguments, sign_in_from_args  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,10 +31,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--grown-before", default=None)
     parser.add_argument("--sample-id", default=None, help="Exact sample label")
     parser.add_argument("--limit", type=int, default=20, help="Max rows to print")
+    add_auth_arguments(parser)
     args = parser.parse_args(argv)
 
     try:
-        client = sign_in()
+        client = sign_in_from_args(args)
         print(client.whoami_str())
 
 

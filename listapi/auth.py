@@ -3,25 +3,29 @@
 Three explicit, single-purpose entry points do the actual work:
 ``sign_in_api_key``, ``sign_in_entra``, ``sign_in_shibboleth``. ``sign_in()``
 is a convenience wrapper that resolves config/env and picks one of them, so
-callers who don't care which method is used (and want it to stay silent when
-already signed in to Entra or to the campus SP) can just call ``sign_in()``.
+callers who don't care which method is used can just call ``sign_in()``.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import html
 import http.server
 import logging
 import os
 import secrets
 import threading
+import time
 import webbrowser
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 from listapi._jwt import post_for_jwt
 from listapi.client import Client
 from listapi.config import load_list_config
+from listapi.errors import SignInCancelled
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +59,12 @@ def sign_in(
 
     - If ``api_key`` is a non-empty string (arg, env, or config): ``X-API-Key``,
       then try ``POST /auth/jwt/api`` for a LiST JWT; on failure keep the key.
-    - Otherwise, ``method`` (or ``LIST_AUTH_METHOD``) picks ``"entra"`` (default)
-      or ``"shibboleth"``. Both are silent when you're already signed in
-      (an Entra silent-token cache, or an existing campus SP session) and only
-      prompt when they're not. Use :func:`sign_in_entra` / :func:`sign_in_shibboleth`
+    - An explicit ``method`` (``"api_key"``, ``"entra"`` or ``"shibboleth"``) is
+      always honoured, even if an API key is configured; ``"api_key"`` raises
+      ``ValueError`` when there is no key.
+    - With no explicit ``method`` and no API key, ``LIST_AUTH_METHOD`` picks
+      ``"entra"`` (default) or ``"shibboleth"``. Entra is silent when a token is cached; Shibboleth
+      always asks you to confirm in the browser. Use :func:`sign_in_entra` / :func:`sign_in_shibboleth`
       directly if you want to force one without going through this resolver.
     """
     cfg_url: str | None = None
@@ -87,7 +93,16 @@ def sign_in(
     else:
         resolved_key = None if api_key in (None, "") else str(api_key)
 
-    if resolved_key:
+    if method == "api_key":
+        if not resolved_key:
+            raise ValueError(
+                "method='api_key' needs an API key (api_key=..., LIST_API_KEY, or config/list.py)"
+            )
+        return sign_in_api_key(resolved_url, resolved_key, api_version=api_version)
+
+    # An explicit entra/shibboleth method overrides a configured API key; only
+    # the unspecified case lets a key (arg, env, config) take precedence.
+    if resolved_key and method is None:
         return sign_in_api_key(resolved_url, resolved_key, api_version=api_version)
 
     resolved_method = _resolve_auth_method(method)
@@ -99,11 +114,7 @@ def sign_in(
 
 def _resolve_auth_method(method: AuthMethod | None) -> Literal["entra", "shibboleth"]:
     if method is not None:
-        if method == "api_key":
-            raise ValueError(
-                "method='api_key' has no url; call sign_in_api_key(url, key) directly"
-            )
-        return method
+        return method  # type: ignore[return-value]  # "api_key" is handled by the caller
     env = (os.environ.get("LIST_AUTH_METHOD") or "").strip().lower()
     if env == "shibboleth":
         return "shibboleth"
@@ -147,7 +158,10 @@ def sign_in_entra(
     the browser outright.
     """
     base_url = base_url.rstrip("/")
-    azure_token = _acquire_entra_token(base_url, entra_mode=entra_mode)
+    try:
+        azure_token = _acquire_entra_token(base_url, entra_mode=entra_mode)
+    except KeyboardInterrupt:
+        raise SignInCancelled("Sign-in cancelled.") from None
     print("Entra sign-in OK; exchanging Azure token for LiST JWT…", flush=True)
     jwt, expiration = post_for_jwt(
         base_url, "auth/jwt/api", bearer=azure_token, raise_on_error=True
@@ -171,27 +185,45 @@ def sign_in_shibboleth(
     """
     Sign in via the campus Shibboleth SP (InCommon) and exchange the result for a LiST JWT.
 
-    Opens a browser to ``{base_url}/auth/shibboleth-cli``, which is silent (no
-    prompt) if you already have a campus SP session, and otherwise redirects you
-    to your institution's login. The result comes back on a one-shot localhost
-    listener as a one-time code, which is exchanged server-side for a JWT via
-    ``POST /auth/jwt/shib`` — the code itself is never a usable credential.
+    Opens a browser to ``{base_url}/auth/shibboleth-cli``. If you have no campus
+    SP session you are sent to your institution's login first. The server then
+    asks you to confirm signing in for the shown account and local port; only
+    **Continue** sends a one-time code to a one-shot localhost listener, and
+    **Cancel** aborts. The code is exchanged for a JWT via ``POST /auth/jwt/shib``
+    together with a PKCE verifier (RFC 7636, S256) that never left this process,
+    so the code alone is not a usable credential.
 
     Requires the server to have the ``auth/shibboleth-cli`` / ``auth/jwt/shib``
     endpoints (not every LiST server does).
     """
     base_url = base_url.rstrip("/")
     state = secrets.token_urlsafe(24)
-    code_box: dict[str, str] = {}
+    code_verifier = secrets.token_urlsafe(32)  # 43 characters, RFC 7636 alphabet
+    code_challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode("ascii")).digest())
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+    # "code" on success, "error" otherwise (including "state_mismatch").
+    result: dict[str, str] = {}
     done = threading.Event()
 
     class _CallbackHandler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *_args: Any) -> None:  # silence default stderr logging
             pass
 
+        def _page(self, message: str) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(
+                f"<html><body>{html.escape(message)} You can close this tab.</body></html>".encode()
+            )
+
         def do_GET(self) -> None:  # noqa: N802 (stdlib method name)
             parsed = urlparse(self.path)
             if parsed.path != "/callback":
+                # e.g. /favicon.ico; keep waiting for the real callback.
                 self.send_response(404)
                 self.end_headers()
                 return
@@ -199,57 +231,76 @@ def sign_in_shibboleth(
             got_state = (params.get("state") or [""])[0]
             code = (params.get("code") or [""])[0]
             error = (params.get("error") or [""])[0]
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            if error:
-                self.wfile.write(
-                    f"<html><body>Shibboleth sign-in failed: {error}. "
-                    "You can close this tab.</body></html>".encode()
-                )
-            elif got_state != state or not code:
-                self.wfile.write(
-                    b"<html><body>Sign-in response did not match this request "
-                    b"(possible tampering) - rejected. You can close this tab.</body></html>"
-                )
+            if not secrets.compare_digest(got_state, state):
+                # Applies to errors too: an unauthenticated error is as untrusted as a code.
+                result["error"] = "state_mismatch"
+                self._page("Sign-in response did not match this request (possible tampering) - rejected.")
+            elif error:
+                result["error"] = error
+                if error == "access_denied":
+                    self._page("Shibboleth sign-in was cancelled.")
+                else:
+                    self._page(f"Shibboleth sign-in failed: {error}.")
+            elif not code:
+                result["error"] = "no_code"
+                self._page("Sign-in response contained no code - rejected.")
             else:
-                code_box["code"] = code
-                self.wfile.write(
-                    b"<html><body>Signed in. You can close this tab.</body></html>"
-                )
+                result["code"] = code
+                self._page("Signed in.")
             done.set()
 
     server = http.server.HTTPServer(("127.0.0.1", 0), _CallbackHandler)
     port = server.server_address[1]
-    thread = threading.Thread(target=server.handle_request, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
-    login_url = urljoin(base_url + "/", "auth/shibboleth-cli") + f"?port={port}&state={state}"
+    query = urlencode(
+        {
+            "port": port,
+            "state": state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+        }
+    )
+    login_url = urljoin(base_url + "/", "auth/shibboleth-cli") + "?" + query
     print(
         "Opening a browser for Shibboleth (InCommon) sign-in.\n"
-        "If you already have a campus session this should complete without a prompt.\n"
+        "Log in if asked, then confirm the sign-in for the account and port shown.\n"
         f"Waiting up to {timeout_sec:.0f}s. Ctrl+C to cancel.",
         flush=True,
     )
-    webbrowser.open(login_url)
+    try:
+        webbrowser.open(login_url)
+        # Wait in short slices: on Windows a single long Event.wait() is not
+        # interrupted by Ctrl+C, so the "Ctrl+C to cancel" hint would be a lie.
+        deadline = time.monotonic() + timeout_sec
+        finished = False
+        while not finished and time.monotonic() < deadline:
+            finished = done.wait(timeout=min(0.25, max(0.0, deadline - time.monotonic())))
+    except KeyboardInterrupt:
+        raise SignInCancelled("Sign-in cancelled.") from None
+    finally:
+        server.shutdown()
+        server.server_close()
 
-    thread.join(timeout=timeout_sec)
-    if not done.is_set():
-        try:
-            server.server_close()
-        except OSError:
-            pass
+    if not finished:
         raise RuntimeError(
             f"Shibboleth sign-in timed out after {timeout_sec:.0f}s "
             "(browser closed, or the server has no auth/shibboleth-cli endpoint)."
         )
 
-    code = code_box.get("code")
-    if not code:
-        raise RuntimeError("Shibboleth sign-in was rejected or returned no code; see browser tab.")
+    error = result.get("error")
+    if error == "access_denied":
+        raise SignInCancelled("Sign-in cancelled.")
+    if error:
+        raise RuntimeError(f"Shibboleth sign-in failed: {error}; see browser tab.")
+    code = result["code"]
 
     jwt, expiration = post_for_jwt(
-        base_url, "auth/jwt/shib", json_body={"code": code}, raise_on_error=True
+        base_url,
+        "auth/jwt/shib",
+        json_body={"code": code, "codeVerifier": code_verifier},
+        raise_on_error=True,
     )
     if not jwt:
         raise RuntimeError(
@@ -362,7 +413,10 @@ def _acquire_token_interactive_with_timeout(
 
     thread = threading.Thread(target=_run, name="listapi-msal-interactive", daemon=True)
     thread.start()
-    thread.join(timeout=timeout_sec)
+    # Join in short slices: on Windows a single long join() can't be interrupted by Ctrl+C.
+    deadline = time.monotonic() + timeout_sec
+    while thread.is_alive() and time.monotonic() < deadline:
+        thread.join(timeout=min(0.25, max(0.0, deadline - time.monotonic())))
     if thread.is_alive():
         logger.warning(
             "Interactive Entra login still waiting after %ss (browser closed or "

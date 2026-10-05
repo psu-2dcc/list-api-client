@@ -17,7 +17,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from listapi import sign_in  # noqa: E402
+from listapi.cli import add_auth_arguments, sign_in_from_args  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,13 +35,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Substrate material id (repeatable)",
     )
     parser.add_argument("--description", default=None)
+    add_auth_arguments(parser)
     args = parser.parse_args(argv)
 
     if not args.file.is_file():
         print(f"File not found: {args.file}", file=sys.stderr)
         return 1
 
-    client = sign_in()
+    client = sign_in_from_args(args)
     create_kwargs: dict = {"researcher_key": args.researcher_key}
     if args.substrate_material_ids:
         create_kwargs["substrateMaterialIds"] = args.substrate_material_ids

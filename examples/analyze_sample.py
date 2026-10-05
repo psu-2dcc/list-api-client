@@ -16,7 +16,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from listapi import ListApiError, sign_in  # noqa: E402
+from listapi import ListApiError  # noqa: E402
+from listapi.cli import add_auth_arguments, sign_in_from_args  # noqa: E402
 from listapi.ids import file_download_url  # noqa: E402
 
 
@@ -26,10 +27,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--date", required=True, help="Activity date (YYYY-MM-DD)")
     parser.add_argument("--instrument", default=None, help="Optional char instrument id")
     parser.add_argument("--technique", default=None, help="Optional char technique id")
+    add_auth_arguments(parser)
     args = parser.parse_args(argv)
 
     try:
-        client = sign_in()
+        client = sign_in_from_args(args)
         acts = client.activities(
             args.sample_id,
             kind="char",

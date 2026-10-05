@@ -6,7 +6,7 @@ from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from listapi.auth import sign_in, sign_in_api_key, sign_in_entra, sign_in_shibboleth
 from listapi.client import Client
-from listapi.errors import ListApiError
+from listapi.errors import ListApiError, SignInCancelled
 from listapi.import_status import (
     DEFAULT_IMPORT_STATUSES,
     FILTER_ALL,
@@ -30,11 +30,12 @@ try:
     __version__ = _pkg_version("listapi")
 except PackageNotFoundError:
     # Source tree without an install (e.g. raw path on sys.path).
-    __version__ = "0.3.1"
+    __version__ = "0.4.0"
 
 __all__ = [
     "Client",
     "ListApiError",
+    "SignInCancelled",
     "sign_in",
     "sign_in_api_key",
     "sign_in_entra",

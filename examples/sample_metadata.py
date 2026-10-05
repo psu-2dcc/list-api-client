@@ -18,16 +18,18 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from listapi import ListApiError, sign_in  # noqa: E402
+from listapi import ListApiError  # noqa: E402
+from listapi.cli import add_auth_arguments, sign_in_from_args  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Print LiST sample metadata as JSON")
     parser.add_argument("sample_id", help="Sample label or numeric id")
+    add_auth_arguments(parser)
     args = parser.parse_args(argv)
 
     try:
-        client = sign_in()
+        client = sign_in_from_args(args)
         sample = client.get_sample(args.sample_id)
     except (ListApiError, RuntimeError) as exc:
         print(exc, file=sys.stderr)

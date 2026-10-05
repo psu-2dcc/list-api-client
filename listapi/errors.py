@@ -7,6 +7,14 @@ from typing import Any
 import requests
 
 
+class SignInCancelled(RuntimeError):
+    """The user cancelled sign-in (Ctrl+C, or Cancel in the browser).
+
+    A ``RuntimeError`` subclass, so existing ``except RuntimeError`` handlers
+    keep working; catch this one first to treat cancelling as a non-error.
+    """
+
+
 class ListApiError(Exception):
     """Raised for failed LiST API calls (especially 401 / 403 / 404)."""
 

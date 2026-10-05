@@ -45,17 +45,17 @@ Bump **`version` in [`pyproject.toml`](pyproject.toml)** for every release (semv
 
 | Change | Bump |
 |--------|------|
-| Bugfix / docs only | patch (`0.2.0` → `0.2.1`) |
-| New helpers / MCP tools / compatible API | minor (`0.2.0` → `0.3.0`) |
+| Bugfix / docs only | patch (`0.4.0` → `0.4.1`) |
+| New helpers / MCP tools / compatible API | minor (`0.4.0` → `0.5.0`) |
 | Breaking Client / `sign_in` behavior | major |
 
 Pin a release from GitHub with a tag (preferred over floating `main`):
 
 ```bash
-pip install "git+https://github.com/psu-2dcc/list-api-client.git@v0.2.0"
+pip install "git+https://github.com/psu-2dcc/list-api-client.git@v0.4.0"
 ```
 
-Create the matching git tag when you publish (`v0.2.0` for version `0.2.0`).
+Create the matching git tag when you publish (`v0.4.0` for version `0.4.0`).
 
 ---
 
@@ -83,7 +83,9 @@ client = sign_in(url="https://list.2dccmip.org/list/dotnet", api_key="…")
 |------|------|
 | **API key** | Non-empty key from arg / `LIST_API_KEY` / config. Calls `POST /auth/jwt/api`, then sends `X-API-Key` (and Bearer JWT when obtained) on **every** request. |
 | **Entra** | No API key, `method="entra"` (default) or `LIST_AUTH_METHOD=entra`. Needs `listapi[entra]`. Browser by default; `sign_in(entra="device")` or `LIST_ENTRA_MODE=device` for SSH. MSAL cache: `~/.list/msal_cache.bin`. |
-| **Shibboleth** | No API key, `method="shibboleth"` or `LIST_AUTH_METHOD=shibboleth`. Opens a browser to your institution's login (silent if you already have a campus session); needs a LiST server with the `auth/shibboleth-cli` / `auth/jwt/shib` endpoints. |
+| **Shibboleth** | No API key, `method="shibboleth"` or `LIST_AUTH_METHOD=shibboleth`. Opens a browser to your institution's login if needed, then asks you to confirm the sign-in for the shown account and local port (PKCE-protected, so it is never silent); needs a LiST server with the `auth/shibboleth-cli` / `auth/jwt/shib` endpoints. |
+
+**How Shibboleth sign-in works.** `sign_in_shibboleth` opens `{url}/auth/shibboleth-cli` in the browser and listens once on `http://127.0.0.1:<port>/callback`. If you have no campus session you log in first; the server then shows "A program on this computer (local port N) wants to sign in to LiST as `<eppn>`" with **Continue** / **Cancel**. Only **Continue** sends a one-time code to the listener, so it is never silent, even with an existing session. The client exchanges the code at `POST auth/jwt/shib` together with a PKCE verifier (RFC 7636, S256, generated per sign-in and never sent through the browser), so a code intercepted on the loopback redirect is useless on its own. `state` is checked on every callback, including errors. Failures: **Cancel** (`access_denied`) and Ctrl+C raise `SignInCancelled`; `shibboleth_disabled`, `no_shibboleth_session` and `unknown_user` raise `RuntimeError`; no callback within 120 s (`timeout_sec=`) is a timeout error. A server without PKCE support ignores the extra parameters, so this client also works there; a PKCE-enforcing server rejects older clients (< 0.4.0) with HTTP 400 in the browser tab.
 
 To force one method regardless of env/config, call `sign_in_api_key(url, api_key)`, `sign_in_entra(url, entra_mode=...)` or `sign_in_shibboleth(url)` directly instead of `sign_in()`.
 
@@ -127,7 +129,7 @@ Public imports: `from listapi import sign_in, Client, ListApiError` (plus import
 
 | Symbol | Role |
 |--------|------|
-| `sign_in(*, url=None, api_key=…, api_version=2, method=None, entra=None)` | Build authenticated `Client`, picking API key / Entra / Shibboleth |
+| `sign_in(*, url=None, api_key=…, api_version=2, method=None, entra=None)` | Build authenticated `Client`; `method="api_key"\|"entra"\|"shibboleth"` is honoured even if a key is configured |
 | `sign_in_api_key(url, api_key, *, api_version=2)` | Force API-key sign-in |
 | `sign_in_entra(url, *, api_version=2, entra_mode="interactive")` | Force Entra sign-in |
 | `sign_in_shibboleth(url, *, api_version=2, timeout_sec=120)` | Force Shibboleth sign-in |
@@ -288,6 +290,20 @@ python examples/sample_stats.py --syn-instrument MBE2 --grown-after 2026-01-01
 python examples/analyze_sample.py SAMPLE_ID --date 2026-09-21
 python examples/pipeline_create.py
 ```
+
+Every example accepts the same sign-in options (from `listapi.cli`, reusable in your own scripts via `add_auth_arguments(parser)` / `sign_in_from_args(args)`):
+
+| Option | Meaning |
+|--------|---------|
+| `--auth api-key\|entra\|shibboleth` | Force a method. Default: API key from `LIST_API_KEY` / `config/list.py` if set, else `LIST_AUTH_METHOD` (Entra unless `shibboleth`). An explicit choice overrides a configured key. |
+| `--url URL` | LiST base URL (default `LIST_URL` / config) |
+| `--entra-mode interactive\|device\|auto` | Entra only; `device` for SSH / headless |
+
+```bash
+python examples/sample_stats.py --auth shibboleth --url http://localhost:4000/dotnet
+```
+
+Ctrl+C (or **Cancel** in the browser) prints `Sign-in cancelled.` and exits with status 1. In your own code, catch `listapi.SignInCancelled` (a `RuntimeError`).
 
 ---
 
