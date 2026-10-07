@@ -239,6 +239,7 @@ At least one of the three filters is required. Filters are independent (characte
 | `download(file_or_url, dest)` | Write to disk |
 | `upload_file(activity, source, *, filename=None, description=None, metadata=None, visibility=None)` | Path, bytes, or file-like; `metadata` dict → custom file fields, `visibility` `P` / `U` / `I` |
 | `update_file_metadata(activity, file, *, metadata=None, description=None, visibility=None, rename_to=None)` | Edit an uploaded file group (by id, basename or dict); `metadata` merges by label |
+| `upload_dashboard(activity, source, *, filename=None, description=None)` | HTML dashboard; shown in the activity view, not just attached |
 | `upload_activity_file` / `delete_activity_file` | Lower-level variants |
 
 **File metadata.** Every uploaded file belongs to a *file group* (one basename, possibly several versions or formats), and the group carries a description, a visibility and a list of custom fields (label, value, optional type). `upload_file` sets them on upload, `update_file_metadata` changes them later:
@@ -266,8 +267,11 @@ client.update_file_metadata(activity_id, "scan.csv", visibility="P")  # by basen
 - `update_file_metadata` identifies the group by id, by basename, or by the dict `upload_file` / `files` returns. It merges fields by label: listed labels are set (value, type and order replaced), unlisted fields stay. Arguments left as `None` stay unchanged. `rename_to=` changes the basename and needs the id or dict, not the basename.
 - **Re-uploading under an existing basename adds a version to that group, and the server ignores the `description`, `visibility` and `metadata` sent with it.** To change those, call `update_file_metadata` afterwards.
 - Server routes: `POST …/sample-activities/{id}/files/upload` (multipart: `UploadFile`, `Description`, `Visibility`, `Fields[i].Label` / `.Value` / `.Type` / `.Order`) and `PUT …/sample-activities/{id}/file-groups` (JSON `FileMetaDataCreateOrUpdateRequest`). Both return a `FileMetaDataDto`.
+- `upload_dashboard` does not take `metadata` / `visibility` yet.
 
 Example: `examples/upload_with_metadata.py ACTIVITY_ID FILE --meta Technique=XRD --meta "Scan rate=0.5"` (or `--meta-json meta.json`; add `--update` to edit an existing file's metadata instead of uploading).
+
+**Dashboards.** `upload_dashboard` (`POST …/files/upload-dashboard`, sample activities only) stores a self-contained `.html` / `.htm` file as-is; it does not touch the recipe. Same authorization as `upload_file`, and a submitted activity is rejected. Re-uploading under the same file name adds a version; under a different name the old file stays on the Files tab and the most recently uploaded one is shown. `GET api/v1/sample-activities/{id}/dashboard` returns what LiST shows. LiST renders it in a sandboxed iframe with a restrictive Content-Security-Policy, so: inline `<script>` / `<style>` work; images and fonts must be `data:` URIs (`blob:` also works for images); external scripts, stylesheets, fonts and fetch / XHR / WebSocket are blocked (bundle chart libraries inline); the page cannot reach the user's LiST session or the API. **A blank dashboard is almost always one of these.** Examples: `examples/upload_dashboard.py ACTIVITY_ID FILE`, and `examples/upload_sample_dashboard.py SAMPLE ACTIVITY FILE` (checks the activity belongs to the sample; ACTIVITY may be an id or `syn` / `char` / `split` when unique). Needs a LiST server that has the `upload-dashboard` route.
 
 ### Data packages
 
@@ -338,6 +342,7 @@ python examples/sample_stats.py --syn-instrument MBE2 --grown-after 2026-01-01
 python examples/analyze_sample.py SAMPLE_ID --date 2026-09-21
 python examples/pipeline_create.py
 python examples/upload_with_metadata.py ACTIVITY_ID scan.csv --meta Technique=XRD
+python examples/upload_sample_dashboard.py SAMPLE_ID ACTIVITY_ID dashboard.html
 ```
 
 Every example accepts the same sign-in options (from `listapi.cli`, reusable in your own scripts via `add_auth_arguments(parser)` / `sign_in_from_args(args)`):

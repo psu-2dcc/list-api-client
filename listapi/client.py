@@ -962,6 +962,47 @@ class Client:
             visibility=visibility,
         )
 
+    def upload_dashboard(
+        self,
+        activity: int | str | dict[str, Any],
+        source: str | Path | bytes | BinaryIO,
+        *,
+        filename: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        POST /api/v{n}/sample-activities/{id}/files/upload-dashboard.
+
+        Store a self-contained HTML dashboard on a sample activity. LiST shows it
+        in the activity view (not just as a download on the Files tab, which is
+        all ``upload_file`` gives you). Returns the file metadata with
+        ``isDashboard: True``. ``filename`` must end in ``.html`` / ``.htm``
+        (``ValueError`` otherwise); it is required when ``source`` is bytes.
+
+        - Same authorization as ``upload_file``; a submitted activity is rejected.
+        - The file is stored as-is and does not touch the recipe.
+        - Uploading again under the same file name adds a new version; under a
+          different name the old file stays on the Files tab and the most recently
+          uploaded dashboard is the one shown.
+        - Sample activities only (not project or theory activities).
+          ``GET api/v1/sample-activities/{id}/dashboard`` returns what LiST shows.
+
+        The HTML is displayed in a sandboxed iframe with a restrictive
+        Content-Security-Policy: inline ``<script>`` / ``<style>`` work; images and
+        fonts must be embedded as ``data:`` URIs; external scripts, stylesheets,
+        fonts and fetch / XHR / WebSocket are blocked (bundle chart libraries
+        inline), and the page cannot reach the user's LiST session or the API. A
+        blank dashboard is almost always one of these.
+        """
+        return self._upload_multipart(
+            activity,
+            source,
+            "files/upload-dashboard",
+            filename=filename,
+            description=description,
+            require_html=True,
+        )
+
     def _upload_multipart(
         self,
         activity: int | str | dict[str, Any],
@@ -972,9 +1013,12 @@ class Client:
         description: str | None,
         metadata: dict[str, Any] | None = None,
         visibility: str | None = None,
+        require_html: bool = False,
     ) -> dict[str, Any]:
         aid = ids.activity_id(activity)
         name, content = _read_upload_source(source, filename=filename)
+        if require_html and not name.lower().endswith((".html", ".htm")):
+            raise ValueError("dashboard must be an .html or .htm file")
         mime = _guess_mime_type(name)
         url = self._api(f"sample-activities/{aid}/{route}")
         files = {"UploadFile": (name, content, mime)}
