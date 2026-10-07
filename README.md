@@ -45,17 +45,17 @@ Bump **`version` in [`pyproject.toml`](pyproject.toml)** for every release (semv
 
 | Change | Bump |
 |--------|------|
-| Bugfix / docs only | patch (`0.4.0` → `0.4.1`) |
-| New helpers / MCP tools / compatible API | minor (`0.4.0` → `0.5.0`) |
+| Bugfix / docs only | patch (`0.5.0` → `0.5.1`) |
+| New helpers / MCP tools / compatible API | minor (`0.5.0` → `0.6.0`) |
 | Breaking Client / `sign_in` behavior | major |
 
 Pin a release from GitHub with a tag (preferred over floating `main`):
 
 ```bash
-pip install "git+https://github.com/psu-2dcc/list-api-client.git@v0.4.0"
+pip install "git+https://github.com/psu-2dcc/list-api-client.git@v0.6.0"
 ```
 
-Create the matching git tag when you publish (`v0.4.0` for version `0.4.0`).
+Create the matching git tag when you publish (`v0.6.0` for version `0.6.0`).
 
 ---
 
@@ -183,6 +183,25 @@ rows = client.find_samples(syn_instrument="MBE2", grown_after="2026-01-01", char
 stats = client.sample_stats(syn_instrument="MBE2", grown_after="2026-01-01")
 ```
 
+### Notes (samples and activities)
+
+Each method exists for samples (`*_sample_note*`, path `samples/{idOrLabel}/notes`) and for sample activities (`*_activity_note*`, path `sample-activities/{id}/notes`). The first argument is the sample (label, id or dict) or the activity (id or dict).
+
+| Method | Endpoint / behavior |
+|--------|---------------------|
+| `get_sample_notes` / `get_activity_notes` | `GET …/notes` — only notes the caller may read |
+| `save_sample_notes` / `save_activity_notes(owner, notes)` | `POST …/notes` — upsert per item (`id` null → insert); omitted notes are **not** deleted |
+| `add_sample_note` / `add_activity_note(owner, title, text, *, visibility="U")` | Insert one note, return it as saved |
+| `upsert_sample_note_by_title` / `upsert_activity_note_by_title(owner, title, text, *, visibility="U")` | Update the note with this exact title, else insert — idempotent for re-runs |
+| `delete_sample_note` / `delete_activity_note(owner, note_id)` | `DELETE …/notes/{noteId}` |
+
+`visibility`: `P` (on publication), `U` (user/PI, default), `I` (internal). `text` is HTML; the server sanitizes it on save (flattens `div` / `a`, keeps tables, images, inline styles), so compare against the stored note, not your local HTML, to detect changes.
+
+```python
+client.upsert_sample_note_by_title("MBE2.123", "Growth log", "<p>Substrate cleaned…</p>")
+client.upsert_activity_note_by_title(4711, "XRD remarks", "<p>Peak shift at 2θ = 31°</p>")
+```
+
 ### Activities
 
 | Method | Notes |
@@ -218,8 +237,37 @@ At least one of the three filters is required. Filters are independent (characte
 | `file_bytes(file_or_url_or_activity)` | Download into memory (small CSV / spectra) |
 | `file_stream(file_or_url)` | Streaming `Response` |
 | `download(file_or_url, dest)` | Write to disk |
-| `upload_file(activity, source, *, filename=None, description=None)` | Path, bytes, or file-like |
+| `upload_file(activity, source, *, filename=None, description=None, metadata=None, visibility=None)` | Path, bytes, or file-like; `metadata` dict → custom file fields, `visibility` `P` / `U` / `I` |
+| `update_file_metadata(activity, file, *, metadata=None, description=None, visibility=None, rename_to=None)` | Edit an uploaded file group (by id, basename or dict); `metadata` merges by label |
 | `upload_activity_file` / `delete_activity_file` | Lower-level variants |
+
+**File metadata.** Every uploaded file belongs to a *file group* (one basename, possibly several versions or formats), and the group carries a description, a visibility and a list of custom fields (label, value, optional type). `upload_file` sets them on upload, `update_file_metadata` changes them later:
+
+```python
+meta = client.upload_file(
+    activity_id,
+    "scan.csv",
+    description="XRD scan, 2θ 10–80°",
+    visibility="I",  # P = on publication, U = PI only, I = internal
+    metadata={
+        "Technique": "XRD",
+        "Scan rate": {"value": 0.5, "type": "Number"},  # optional column type
+        "Annealed": True,
+    },
+)
+print(meta["id"], meta["basename"], meta["fields"])
+
+client.update_file_metadata(activity_id, meta, metadata={"Technique": "XRD (grazing)"})
+client.update_file_metadata(activity_id, "scan.csv", visibility="P")  # by basename
+```
+
+- `metadata` keys are the field labels (non-empty), in dict order. Values become strings: `None` → `""`, booleans → `"true"` / `"false"`, dates → ISO 8601, everything else `str()`. To set the column type as well, pass `{"value": ..., "type": "Number"}` (LiST column types such as `Text`, `Number`, `Time`).
+- `visibility` takes `P` / `U` / `I` or the long names `OnPublication` / `UserPI` / `Internal`. Left out, the server default applies.
+- `update_file_metadata` identifies the group by id, by basename, or by the dict `upload_file` / `files` returns. It merges fields by label: listed labels are set (value, type and order replaced), unlisted fields stay. Arguments left as `None` stay unchanged. `rename_to=` changes the basename and needs the id or dict, not the basename.
+- **Re-uploading under an existing basename adds a version to that group, and the server ignores the `description`, `visibility` and `metadata` sent with it.** To change those, call `update_file_metadata` afterwards.
+- Server routes: `POST …/sample-activities/{id}/files/upload` (multipart: `UploadFile`, `Description`, `Visibility`, `Fields[i].Label` / `.Value` / `.Type` / `.Order`) and `PUT …/sample-activities/{id}/file-groups` (JSON `FileMetaDataCreateOrUpdateRequest`). Both return a `FileMetaDataDto`.
+
+Example: `examples/upload_with_metadata.py ACTIVITY_ID FILE --meta Technique=XRD --meta "Scan rate=0.5"` (or `--meta-json meta.json`; add `--update` to edit an existing file's metadata instead of uploading).
 
 ### Data packages
 
@@ -289,6 +337,7 @@ python examples/find_samples.py --syn-instrument MBE2 --grown-after 2026-01-01
 python examples/sample_stats.py --syn-instrument MBE2 --grown-after 2026-01-01
 python examples/analyze_sample.py SAMPLE_ID --date 2026-09-21
 python examples/pipeline_create.py
+python examples/upload_with_metadata.py ACTIVITY_ID scan.csv --meta Technique=XRD
 ```
 
 Every example accepts the same sign-in options (from `listapi.cli`, reusable in your own scripts via `add_auth_arguments(parser)` / `sign_in_from_args(args)`):

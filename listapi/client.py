@@ -6,7 +6,7 @@ import logging
 import mimetypes
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, BinaryIO, Iterable
+from typing import Any, BinaryIO, Iterable, Literal
 from urllib.parse import urljoin
 
 import requests
@@ -379,6 +379,133 @@ class Client:
         if data.get("id") is not None or data.get("ID") is not None:
             return data
         raise ValueError(f"create_sample: response has no samples[]: {data!r}")
+
+    # -- Notes (samples and sample activities) ---------------------------------
+    #
+    # Same server contract for both owners: the POST is an upsert per item
+    # (``id`` null/0 inserts, an existing ``id`` updates only if title, text or
+    # visibility changed), notes left out are **not** deleted, and the result is
+    # every note the caller may read. ``text`` is HTML that the server sanitizes,
+    # so the stored text can differ from what was sent. ``visibility``: ``P``
+    # (on publication), ``U`` (user/PI, default), ``I`` (internal).
+
+    def get_sample_notes(self, sample: int | str | dict[str, Any]) -> list[dict[str, Any]]:
+        """GET /api/v{n}/samples/{idOrLabel}/notes (only notes the caller may read)."""
+        return self._get_notes(f"samples/{ids.sample_ref(sample)}")
+
+    def save_sample_notes(
+        self, sample: int | str | dict[str, Any], notes: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """POST /api/v{n}/samples/{idOrLabel}/notes — upsert; returns all readable notes."""
+        return self._save_notes(f"samples/{ids.sample_ref(sample)}", notes)
+
+    def add_sample_note(
+        self,
+        sample: int | str | dict[str, Any],
+        title: str,
+        text: str,
+        *,
+        visibility: Literal["P", "U", "I"] = "U",
+    ) -> dict[str, Any]:
+        """Insert one note on a sample and return it as saved."""
+        return self._add_note(f"samples/{ids.sample_ref(sample)}", title, text, visibility)
+
+    def upsert_sample_note_by_title(
+        self,
+        sample: int | str | dict[str, Any],
+        title: str,
+        text: str,
+        *,
+        visibility: Literal["P", "U", "I"] = "U",
+    ) -> dict[str, Any]:
+        """Update the sample note with this exact title, else insert it (idempotent re-runs)."""
+        return self._upsert_note(f"samples/{ids.sample_ref(sample)}", title, text, visibility)
+
+    def delete_sample_note(self, sample: int | str | dict[str, Any], note_id: int) -> None:
+        """DELETE /api/v{n}/samples/{idOrLabel}/notes/{noteId}."""
+        self._delete_note(f"samples/{ids.sample_ref(sample)}", note_id)
+
+    def get_activity_notes(self, activity: int | str | dict[str, Any]) -> list[dict[str, Any]]:
+        """GET /api/v{n}/sample-activities/{id}/notes (only notes the caller may read)."""
+        return self._get_notes(f"sample-activities/{ids.activity_id(activity)}")
+
+    def save_activity_notes(
+        self, activity: int | str | dict[str, Any], notes: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """POST /api/v{n}/sample-activities/{id}/notes — upsert; returns all readable notes."""
+        return self._save_notes(f"sample-activities/{ids.activity_id(activity)}", notes)
+
+    def add_activity_note(
+        self,
+        activity: int | str | dict[str, Any],
+        title: str,
+        text: str,
+        *,
+        visibility: Literal["P", "U", "I"] = "U",
+    ) -> dict[str, Any]:
+        """Insert one note on a sample activity and return it as saved."""
+        return self._add_note(
+            f"sample-activities/{ids.activity_id(activity)}", title, text, visibility
+        )
+
+    def upsert_activity_note_by_title(
+        self,
+        activity: int | str | dict[str, Any],
+        title: str,
+        text: str,
+        *,
+        visibility: Literal["P", "U", "I"] = "U",
+    ) -> dict[str, Any]:
+        """Update the activity note with this exact title, else insert it (idempotent re-runs)."""
+        return self._upsert_note(
+            f"sample-activities/{ids.activity_id(activity)}", title, text, visibility
+        )
+
+    def delete_activity_note(self, activity: int | str | dict[str, Any], note_id: int) -> None:
+        """DELETE /api/v{n}/sample-activities/{id}/notes/{noteId}."""
+        self._delete_note(f"sample-activities/{ids.activity_id(activity)}", note_id)
+
+    def _get_notes(self, owner: str) -> list[dict[str, Any]]:
+        resp = self._request("GET", self._api(f"{owner}/notes"))
+        self._raise(resp, f"GET {owner}/notes")
+        return _note_list(resp.json(), f"GET {owner}/notes")
+
+    def _save_notes(self, owner: str, notes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        resp = self._request("POST", self._api(f"{owner}/notes"), json=notes)
+        self._raise(resp, f"POST {owner}/notes")
+        return _note_list(resp.json(), f"POST {owner}/notes")
+
+    def _add_note(self, owner: str, title: str, text: str, visibility: str) -> dict[str, Any]:
+        # The POST does not report the new id: take the note with this title
+        # whose id was not there before, else the newest one with this title.
+        before = {n.get("id") for n in self._get_notes(owner)}
+        saved = self._save_notes(
+            owner, [{"id": None, "title": title, "text": text, "visibility": visibility}]
+        )
+        matches = [n for n in saved if n.get("title") == title]
+        new = [n for n in matches if n.get("id") not in before]
+        note = _newest_note(new or matches)
+        if note is None:
+            raise ValueError(f"{owner}: saved note {title!r} not found in response")
+        return note
+
+    def _upsert_note(self, owner: str, title: str, text: str, visibility: str) -> dict[str, Any]:
+        # If several notes share the title, the newest one is updated.
+        existing = _newest_note(n for n in self._get_notes(owner) if n.get("title") == title)
+        if existing is None or not existing.get("id"):
+            return self._add_note(owner, title, text, visibility)
+        note_id = existing["id"]
+        saved = self._save_notes(
+            owner, [{"id": note_id, "title": title, "text": text, "visibility": visibility}]
+        )
+        for note in saved:
+            if note.get("id") == note_id:
+                return note
+        raise ValueError(f"{owner}: note {note_id} not found in response")
+
+    def _delete_note(self, owner: str, note_id: int) -> None:
+        resp = self._request("DELETE", self._api(f"{owner}/notes/{note_id}"))
+        self._raise(resp, f"DELETE {owner}/notes/{note_id}")
 
     # -- Data packages --------------------------------------------------------
 
@@ -810,21 +937,62 @@ class Client:
         *,
         filename: str | None = None,
         description: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        visibility: str | None = None,
     ) -> dict[str, Any]:
-        """POST /api/v{n}/sample-activities/{id}/files/upload."""
+        """
+        POST /api/v{n}/sample-activities/{id}/files/upload (plain attachment).
+
+        ``metadata`` becomes the file's custom metadata fields (label → value, in
+        dict order). A value is stringified; pass ``{"value": ..., "type": "Number"}``
+        to set the column type too. ``visibility``: ``P`` (on publication),
+        ``U`` (PI only) or ``I`` (internal). Returns the file-group metadata.
+
+        Re-uploading under an existing basename adds a version to that group and
+        the server ignores ``description`` / ``visibility`` / ``metadata``; use
+        :meth:`update_file_metadata` for those.
+        """
+        return self._upload_multipart(
+            activity,
+            source,
+            "files/upload",
+            filename=filename,
+            description=description,
+            metadata=metadata,
+            visibility=visibility,
+        )
+
+    def _upload_multipart(
+        self,
+        activity: int | str | dict[str, Any],
+        source: str | Path | bytes | BinaryIO,
+        route: str,
+        *,
+        filename: str | None,
+        description: str | None,
+        metadata: dict[str, Any] | None = None,
+        visibility: str | None = None,
+    ) -> dict[str, Any]:
         aid = ids.activity_id(activity)
         name, content = _read_upload_source(source, filename=filename)
         mime = _guess_mime_type(name)
-        url = self._api(f"sample-activities/{aid}/files/upload")
+        url = self._api(f"sample-activities/{aid}/{route}")
         files = {"UploadFile": (name, content, mime)}
-        data: dict[str, str] = {}
+        data: list[tuple[str, str]] = []
         if description:
-            data["Description"] = description
+            data.append(("Description", description))
+        if visibility is not None:
+            # Form binding parses the enum member name, not the P/U/I wire value.
+            data.append(("Visibility", _VISIBILITY_FORM_NAMES[_visibility_code(visibility)]))
+        # ASP.NET binds list items from indexed keys: Fields[0].Label, Fields[0].Value, ...
+        for i, field in enumerate(_metadata_fields(metadata)):
+            for key, value in field.items():
+                data.append((f"Fields[{i}].{key[0].upper()}{key[1:]}", str(value)))
         resp = self._request("POST", url, files=files, data=data or None, timeout=300)
-        self._raise(resp, f"POST sample-activities/{aid}/files/upload")
+        self._raise(resp, f"POST sample-activities/{aid}/{route}")
         payload = resp.json()
         if not isinstance(payload, dict):
-            raise ValueError(f"Expected object from files/upload, got {type(payload)}")
+            raise ValueError(f"Expected object from {route}, got {type(payload)}")
         return payload
 
     def upload_activity_file(
@@ -834,11 +1002,65 @@ class Client:
         content: bytes,
         *,
         description: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        visibility: str | None = None,
     ) -> dict[str, Any]:
         """Alias matching recipe_pipeline.list_client.upload_activity_file."""
         return self.upload_file(
-            activity, content, filename=filename, description=description
+            activity,
+            content,
+            filename=filename,
+            description=description,
+            metadata=metadata,
+            visibility=visibility,
         )
+
+    def update_file_metadata(
+        self,
+        activity: int | str | dict[str, Any],
+        file: int | str | dict[str, Any],
+        *,
+        metadata: dict[str, Any] | None = None,
+        description: str | None = None,
+        visibility: str | None = None,
+        rename_to: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        PUT /api/v{n}/sample-activities/{id}/file-groups — edit an uploaded file's metadata.
+
+        ``file``: file-group id (int), basename (str) or a file-group dict from
+        :meth:`files` / :meth:`upload_file`. ``metadata`` is merged by label:
+        listed labels are set, other existing fields are kept. Arguments left as
+        ``None`` are unchanged. ``rename_to`` changes the basename (needs an id).
+        """
+        aid = ids.activity_id(activity)
+        body: dict[str, Any] = {}
+        if isinstance(file, dict):
+            group_id = file.get("id") if file.get("id") is not None else file.get("Id")
+            if group_id is None:
+                raise ValueError("file-group dict has no id")
+            body["id"] = int(group_id)
+        elif isinstance(file, int):
+            body["id"] = file
+        else:
+            body["basename"] = str(file)
+        if rename_to is not None:
+            if "id" not in body:
+                raise ValueError("rename_to needs the file-group id, not its basename")
+            body["basename"] = rename_to
+        if description is not None:
+            body["description"] = description
+        if visibility is not None:
+            body["visibility"] = _visibility_code(visibility)
+        if metadata:
+            body["fields"] = _metadata_fields(metadata)
+        url = self._api(f"sample-activities/{aid}/file-groups")
+        resp = self._request("PUT", url, json=body)
+        self._raise(resp, f"PUT sample-activities/{aid}/file-groups")
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected object from file-groups PUT, got {type(data)}")
+        return data
 
     def delete_activity_file(
         self,
@@ -1008,6 +1230,17 @@ def _activity_date(row: dict[str, Any]) -> date | None:
         return None
 
 
+def _note_list(data: Any, what: str) -> list[dict[str, Any]]:
+    if not isinstance(data, list):
+        raise ValueError(f"Expected list from {what}, got {type(data)}")
+    return [row for row in data if isinstance(row, dict)]
+
+
+def _newest_note(notes: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
+    """Note with the latest ``lastChangedDate`` (ISO strings sort chronologically)."""
+    return max(notes, key=lambda n: str(n.get("lastChangedDate") or ""), default=None)
+
+
 def _activity_matches(
     row: dict[str, Any],
     *,
@@ -1086,6 +1319,47 @@ def _read_upload_source(
     path = Path(source)
     name = filename or path.name
     return name, path.read_bytes()
+
+
+_VISIBILITY_FORM_NAMES = {"P": "OnPublication", "U": "UserPI", "I": "Internal"}
+
+
+def _visibility_code(value: str) -> str:
+    """Normalize ``P``/``U``/``I`` or the enum name (``UserPI``) to the one-letter code."""
+    text = str(value).strip()
+    if text.upper() in _VISIBILITY_FORM_NAMES:
+        return text.upper()
+    for code, name in _VISIBILITY_FORM_NAMES.items():
+        if text.lower() == name.lower():
+            return code
+    raise ValueError(f"visibility must be P, U or I, got {value!r}")
+
+
+def _metadata_fields(metadata: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Metadata dict → FileMetaDataFieldWriteRequest list (label, value, optional type, order)."""
+    fields: list[dict[str, Any]] = []
+    for order, (label, raw) in enumerate((metadata or {}).items()):
+        if not str(label).strip():
+            raise ValueError("metadata labels must be non-empty")
+        field_type = None
+        if isinstance(raw, dict):
+            field_type = raw.get("type")
+            raw = raw.get("value")
+        field: dict[str, Any] = {"label": str(label), "value": _field_value(raw), "order": order}
+        if field_type:
+            field["type"] = str(field_type)
+        fields.append(field)
+    return fields
+
+
+def _field_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return str(value)
 
 
 def _guess_mime_type(filename: str) -> str:
