@@ -2,6 +2,20 @@
 
 from __future__ import annotations
 
+import os
+
+# Verify TLS against the OS trust store (Windows cert store, macOS keychain)
+# instead of certifi's bundle, so servers signed by an organization's internal
+# CA work the same as in the browser. Must run before requests/urllib3 build
+# any SSL context. Set LISTAPI_NO_TRUSTSTORE=1 to keep certifi.
+if not os.environ.get("LISTAPI_NO_TRUSTSTORE"):
+    try:
+        import truststore
+
+        truststore.inject_into_ssl()
+    except ImportError:
+        pass
+
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from listapi.auth import sign_in, sign_in_api_key, sign_in_entra, sign_in_shibboleth
@@ -30,7 +44,7 @@ try:
     __version__ = _pkg_version("listapi")
 except PackageNotFoundError:
     # Source tree without an install (e.g. raw path on sys.path).
-    __version__ = "0.6.0"
+    __version__ = "0.6.1"
 
 __all__ = [
     "Client",

@@ -37,7 +37,7 @@ pip install -e .
 # optional: pip install -e ".[entra]" / pip install -e ".[mcp]"
 ```
 
-Requires **Python ≥ 3.10**. Core dependency: `requests`.
+Requires **Python ≥ 3.10**. Core dependencies: `requests`, `truststore` (verifies TLS against the OS certificate store so servers signed by an internal CA work; set `LISTAPI_NO_TRUSTSTORE=1` to opt out).
 
 ### Versioning
 
@@ -52,10 +52,10 @@ Bump **`version` in [`pyproject.toml`](pyproject.toml)** for every release (semv
 Pin a release from GitHub with a tag (preferred over floating `main`):
 
 ```bash
-pip install "git+https://github.com/psu-2dcc/list-api-client.git@v0.6.0"
+pip install "git+https://github.com/psu-2dcc/list-api-client.git@v0.6.1"
 ```
 
-Create the matching git tag when you publish (`v0.6.0` for version `0.6.0`).
+Create the matching git tag when you publish (`v0.6.1` for version `0.6.1`).
 
 ---
 
