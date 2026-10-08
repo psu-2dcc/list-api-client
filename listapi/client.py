@@ -619,24 +619,25 @@ class Client:
         return data
 
     def create_publication(self, request: dict[str, Any]) -> dict[str, Any]:
-        """POST /api/v{n}/publications — ``request`` is a CreatePublicationRequest (``submit``: false = draft)."""
+        """POST /api/v{n}/publications — ``request`` is a CreatePublicationRequest (``submit``: false = draft).
+
+        ``metadataFromCrossref: true`` records metadata source Crossref, synced now (the
+        :meth:`lookup_doi` draft already carries it); otherwise the source is manual.
+        """
         data = self.post("publications", json=request)
         if not isinstance(data, dict):
             raise ValueError(f"Expected object from create_publication, got {type(data)}")
         return data
 
     def update_publication(self, request: dict[str, Any]) -> dict[str, Any]:
-        """PUT /api/v{n}/publications/{id} — ``request`` is a full UpdatePublicationRequest incl. ``id``."""
+        """PUT /api/v{n}/publications/{id} — ``request`` is a full UpdatePublicationRequest incl. ``id``.
+
+        ``metadataFromCrossref: true`` records metadata source Crossref, synced now. Without it the
+        source becomes manual only when a Crossref field changes; the last sync time stays.
+        """
         data = self.put(f"publications/{request['id']}", json=request)
         if not isinstance(data, dict):
             raise ValueError(f"Expected object from update_publication, got {type(data)}")
-        return data
-
-    def mark_publication_synced(self, id_or_doi: str | int) -> dict[str, Any]:
-        """POST /api/v{n}/publications/{idOrDoi}/metadata-synced — metadata source = Crossref, synced now."""
-        data = self.post(f"publications/{id_or_doi}/metadata-synced")
-        if not isinstance(data, dict):
-            raise ValueError(f"Expected object from mark_publication_synced, got {type(data)}")
         return data
 
     def render_publication(self, request: dict[str, Any]) -> dict[str, Any]:

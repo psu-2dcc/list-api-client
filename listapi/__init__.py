@@ -44,7 +44,7 @@ try:
     __version__ = _pkg_version("listapi")
 except PackageNotFoundError:
     # Source tree without an install (e.g. raw path on sys.path).
-    __version__ = "0.6.1"
+    __version__ = "0.7.0"
 
 __all__ = [
     "Client",

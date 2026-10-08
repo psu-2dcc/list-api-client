@@ -52,10 +52,10 @@ Bump **`version` in [`pyproject.toml`](pyproject.toml)** for every release (semv
 Pin a release from GitHub with a tag (preferred over floating `main`):
 
 ```bash
-pip install "git+https://github.com/psu-2dcc/list-api-client.git@v0.6.1"
+pip install "git+https://github.com/psu-2dcc/list-api-client.git@v0.7.0"
 ```
 
-Create the matching git tag when you publish (`v0.6.1` for version `0.6.1`).
+Create the matching git tag when you publish (`v0.7.0` for version `0.7.0`).
 
 ---
 
@@ -291,12 +291,11 @@ Example: `examples/upload_with_metadata.py ACTIVITY_ID FILE --meta Technique=XRD
 | `find_publications(*, search_text=None, elements=None, materials=None, publication_type=None, science_driver=None, date_from=None, date_to=None, work_type=None, drafts_only=False, instrument_doi=None)` | Auto-paged search; `publication_type` is `"I"` / `"E"` / `"L"`; dates as `yyyy[-MM[-dd]]` |
 | `get_publication_data_packages(id_or_doi)` | Data packages attached to a publication |
 | `lookup_doi(doi, *, include_raw=False)` | Crossref data as a draft (nothing saved); for existing publications `fieldDiffs` with Apply / Report / Error |
-| `create_publication(request)` / `update_publication(request)` | Create (`submit: false` = draft) / full update (`id` in the request) |
-| `mark_publication_synced(id_or_doi)` | Record that the metadata was just synced from Crossref |
+| `create_publication(request)` / `update_publication(request)` | Create (`submit: false` = draft) / full update (`id` in the request); `metadataFromCrossref: true` records a Crossref sync with the save |
 | `render_publication(request)` | Server-rendered `authors` / `cite` preview |
 | `suggest_authors(authors, *, publication_id=None)` | Match authors to LiST users, suggest highlights |
 
-`lookup_doi`, `mark_publication_synced`, `render_publication`, `suggest_authors` and the
+`lookup_doi`, `metadataFromCrossref`, `render_publication`, `suggest_authors` and the
 date / author / funding fields need a LiST server with the extended publication API
 (not on production yet).
 
