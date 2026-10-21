@@ -137,6 +137,17 @@ Public imports: `from listapi import sign_in, Client, ListApiError` (plus import
 | `client.refresh()` | Exchange the current JWT for a new one (`POST auth/jwt/api`); returns `False` if there's nothing to refresh or it fails |
 | `client.whoami()` | `GET api/v1/users/current` — `Id`, `Login`, `Eppn`, `AuthMethod` (`msal`/`shibboleth`/absent), roles, etc. for whoever is actually signed in |
 
+### Instrument history (branch `feature/instrument-history`; needs a LiST server with instrument history ingest)
+
+| Method | Notes |
+|--------|--------|
+| `client.push_instrument_events(instrument, events, *, batch_size=1000)` | Create or update events by external key (`listapi.instruments.InstrumentEvent`); idempotent; `InstrumentPushError` lists invalid items |
+| `client.delete_instrument_event(instrument, external_key)` | `False` if there is no such event |
+| `client.instrument_ingest_status(instrument)` | Pushed event count, latest start and change |
+| `listapi.instruments.stable_key(*parts, prefix=None)` | Stable external key from what identifies a log entry |
+
+Setup (API key with instruments, privilege) and a template for an instrument PC: [docs/instrument-history.md](docs/instrument-history.md), `examples/instrument_log_push.py`.
+
 ### Generic HTTP (any Swagger route)
 
 Paths are under `/api/v{api_version}/` unless you pass an absolute URL. Auth headers are already on the session.

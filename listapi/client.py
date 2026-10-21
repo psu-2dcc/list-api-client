@@ -7,13 +7,19 @@ import mimetypes
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Literal
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import requests
 
 from listapi import ids
 from listapi._jwt import post_for_jwt
 from listapi.errors import ListApiError
+from listapi.instruments import (
+    MAX_EVENTS_PER_PUSH,
+    InstrumentEvent,
+    InstrumentPushError,
+    InstrumentPushResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1146,6 +1152,77 @@ class Client:
             return data
         self._raise(resp, "POST sample-import")
         raise AssertionError("unreachable")
+    # --- Instrument history (needs a LiST server with instrument history ingest) ---
+
+    def push_instrument_events(
+        self,
+        instrument: str,
+        events: Iterable[InstrumentEvent | dict[str, Any]],
+        *,
+        batch_size: int = MAX_EVENTS_PER_PUSH,
+    ) -> InstrumentPushResult:
+        """
+        ``PUT synthesis-instruments/{instrument}/events`` — create or update events by external key.
+
+        Pushing the same events again is safe: unchanged ones are reported as unchanged. Lists longer than
+        ``batch_size`` (at most 1000) go in several requests; each batch is all or nothing. If LiST refuses a
+        batch (422), :class:`listapi.instruments.InstrumentPushError` lists every invalid item with its index in
+        ``events``; earlier batches stay saved, so fix the items and push again.
+
+        Needs an API key that lists the instrument (or managing it) and the privilege InstrumentHistory.
+        ``events`` are :class:`listapi.instruments.InstrumentEvent` or the API's JSON objects.
+        """
+        if not 1 <= batch_size <= MAX_EVENTS_PER_PUSH:
+            raise ValueError(f"batch_size must be between 1 and {MAX_EVENTS_PER_PUSH}")
+        items = [e.to_json() if isinstance(e, InstrumentEvent) else e for e in events]
+        path = f"synthesis-instruments/{quote(instrument, safe='')}/events"
+        total = InstrumentPushResult()
+        for offset in range(0, len(items), batch_size):
+            resp = self._request("PUT", self._api(path), json={"events": items[offset : offset + batch_size]})
+            if resp.status_code == 422:
+                body = _json_or_empty(resp)
+                errors = [{**e, "index": e.get("index", 0) + offset} for e in body.get("errors", [])]
+                raise InstrumentPushError(
+                    f"PUT {path} refused (422): {body.get('message') or resp.reason}",
+                    errors,
+                    status_code=422,
+                    response=resp,
+                )
+            self._raise(resp, f"PUT {path}")
+            data = resp.json()
+            total.created += data.get("created", 0)
+            total.updated += data.get("updated", 0)
+            total.unchanged += data.get("unchanged", 0)
+            total.results += [{**r, "index": r.get("index", 0) + offset} for r in data.get("results", [])]
+        return total
+
+    def delete_instrument_event(self, instrument: str, external_key: str) -> bool:
+        """
+        ``DELETE synthesis-instruments/{instrument}/events/by-key?externalKey=…`` — remove a pushed event.
+
+        Returns False if there is no event with that key.
+        """
+        path = f"synthesis-instruments/{quote(instrument, safe='')}/events/by-key"
+        resp = self._request("DELETE", self._api(path), params={"externalKey": external_key})
+        if resp.status_code == 404:
+            return False
+        self._raise(resp, f"DELETE {path}")
+        return True
+
+    def instrument_ingest_status(self, instrument: str) -> dict[str, Any]:
+        """
+        ``GET synthesis-instruments/{instrument}/ingest-status`` — what has been pushed: ``eventCount``,
+        ``latestEventStart``, ``latestEventChange`` (server time; null when nothing was pushed). Use it to resume
+        reading a log where the last push stopped.
+        """
+        return self.get(f"synthesis-instruments/{quote(instrument, safe='')}/ingest-status")
+
+def _json_or_empty(resp: requests.Response) -> dict[str, Any]:
+    try:
+        data = resp.json()
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _sample_search_body(
