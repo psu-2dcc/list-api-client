@@ -52,7 +52,7 @@ Bump **`version` in [`pyproject.toml`](pyproject.toml)** for every release (semv
 Pin a release from GitHub with a tag (preferred over floating `main`):
 
 ```bash
-pip install "git+https://github.com/psu-2dcc/list-api-client.git@v0.7.0"
+pip install "git+https://github.com/psu-2dcc/list-api-client.git@v0.8.0"
 ```
 
 Create the matching git tag when you publish (`v0.7.0` for version `0.7.0`).
@@ -137,16 +137,34 @@ Public imports: `from listapi import sign_in, Client, ListApiError` (plus import
 | `client.refresh()` | Exchange the current JWT for a new one (`POST auth/jwt/api`); returns `False` if there's nothing to refresh or it fails |
 | `client.whoami()` | `GET api/v1/users/current` — `Id`, `Login`, `Eppn`, `AuthMethod` (`msal`/`shibboleth`/absent), roles, etc. for whoever is actually signed in |
 
-### Instrument history (branch `feature/instrument-history`; needs a LiST server with instrument history ingest)
+### Gatekeeper: input queue and instrument history
+
+Needs a LiST build with the input queue / instrument history APIs. Gatekeeper keys (no internal API) must use
+**api/v2** — the client default.
+
+**Input queue** — push files into `.input-queue` for LiST to place ([docs/input-queue.md](docs/input-queue.md),
+`examples/input_push.py`):
+
+| Method / symbol | Notes |
+|-----------------|--------|
+| `client.push_input(files, metadata)` | `POST input` multipart; `listapi.input.InputMetadata` / dict / JSON; 200 if all known, 202 if new |
+| `client.get_input_item(id)` / `find_input_items(submission_id=…\|external_key=…)` | Own items (or InputQueue Read) |
+| `client.input_ingest_status()` | Sender bookmark: counts per status |
+| `client.input_schema()` | JSON Schema of `list-input/1` |
+| `client.current_gatekeeper()` | Instruments this key may push for (`GET gatekeepers/current`) |
+| `listapi.input` constants | `SCHEMA_V1`, `KIND_*`, `STATUS_*`, `file_sha256` |
+
+**Instrument history** ([docs/instrument-history.md](docs/instrument-history.md), `examples/instrument_log_push.py`):
 
 | Method | Notes |
 |--------|--------|
-| `client.push_instrument_events(instrument, events, *, batch_size=1000)` | Create or update events by external key (`listapi.instruments.InstrumentEvent`); idempotent; `InstrumentPushError` lists invalid items |
-| `client.delete_instrument_event(instrument, external_key)` | `False` if there is no such event |
+| `client.push_instrument_events(instrument, events, *, batch_size=1000)` | Create/update by external key; idempotent; `InstrumentPushError` on 422 |
+| `client.create_instrument_event` / `update_instrument_event` | UI-style single-event write |
+| `client.instrument_history(instrument, *, start=, end=, kinds=)` | Sample runs + events |
+| `client.delete_instrument_event` / `delete_instrument_event_by_id` | By external key or LiST id |
 | `client.instrument_ingest_status(instrument)` | Pushed event count, latest start and change |
-| `listapi.instruments.stable_key(*parts, prefix=None)` | Stable external key from what identifies a log entry |
-
-Setup (API key with instruments, privilege) and a template for an instrument PC: [docs/instrument-history.md](docs/instrument-history.md), `examples/instrument_log_push.py`.
+| `client.list_instrument_event_types()` | Configured type ids |
+| `listapi.instruments.stable_key(*parts, prefix=None)` | Stable external key from a log entry |
 
 ### Generic HTTP (any Swagger route)
 

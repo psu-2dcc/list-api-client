@@ -4,17 +4,18 @@ LiST shows a history per synthesis instrument: sample runs and events such as ma
 and calibrations. Assembling events from an instrument's own logs is instrument-specific, so a script **at the
 instrument** reads them and pushes them to LiST with `listapi`.
 
-> Needs a LiST server with instrument history ingest (branch `prototype/instrument-history`); production LiST does
-> not have it yet. That is why this lives on the `feature/instrument-history` branch of `list-python`.
+> Pair with a LiST build that has instrument history ingest (`PUT/POST synthesis-instruments/{id}/events`).
+> A Gatekeeper key with InstrumentHistory Create+Update is the usual setup when the same machine also pushes files
+> into the input queue ([input-queue.md](input-queue.md)).
 
 ## Setup in LiST (admin)
 
-1. A role for pushing, e.g. "Instrument data push", with the privilege **InstrumentHistory** (Read, Create, Update,
-   Delete) and nothing else that a script on a shared PC should not have.
-2. An **API key**, role-based, with that role, and under **Instrument history** the instrument(s) this PC may write.
-   The key can only change the history of those instruments.
+1. A role for pushing (e.g. the Gatekeeper role) with **InstrumentHistory** Create and Update (Delete if the script
+   should remove events).
+2. An **API key** on a **Gatekeeper** that lists the instrument(s), or a role-based key that lists them under
+   Instrument history. The key can only change those instruments' history.
 3. Event types (Customizing → Instrument event types): the IDs the script sends, e.g. `MAINT`, `CLEAN`, `BAKE`,
-   `CALIB`, `OTHER`.
+   `CALIB`, `OTHER` (`client.list_instrument_event_types()`).
 
 ## The script
 
@@ -48,8 +49,10 @@ except InstrumentPushError as e:
 - **Times**: timezone-aware datetimes, or naive ones (taken as UTC).
 - **Description**: HTML; LiST sanitizes it like notes.
 - **Batches**: up to 1000 events per request; longer lists are split. Each batch is all or nothing.
-- **Delete**: `client.delete_instrument_event("MBE2", external_key)`.
+- **Delete**: `client.delete_instrument_event("MBE2", external_key)` or `delete_instrument_event_by_id`.
 - **Status**: `client.instrument_ingest_status("MBE2")` — number of pushed events, latest start, latest change.
+- **Read / UI-style write**: `client.instrument_history("MBE2")`, `create_instrument_event`, `update_instrument_event`
+  (no external key; use push from scripts so re-runs stay idempotent).
 - Events edited in LiST's UI are overwritten by the next push of the same event.
 
 `examples/instrument_log_push.py` is a template (CSV log, type mapping, `--dry-run`) to copy to an instrument PC

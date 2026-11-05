@@ -14,6 +14,12 @@ import requests
 from listapi import ids
 from listapi._jwt import post_for_jwt
 from listapi.errors import ListApiError
+from listapi.input import (
+    InputMetadata,
+    InputPushResult,
+    metadata_json,
+    normalize_upload_parts,
+)
 from listapi.instruments import (
     MAX_EVENTS_PER_PUSH,
     InstrumentEvent,
@@ -1152,7 +1158,168 @@ class Client:
             return data
         self._raise(resp, "POST sample-import")
         raise AssertionError("unreachable")
-    # --- Instrument history (needs a LiST server with instrument history ingest) ---
+    # -- Gatekeeper -----------------------------------------------------------
+
+    def current_gatekeeper(self) -> dict[str, Any]:
+        """
+        ``GET gatekeepers/current`` — the Gatekeeper this API key belongs to.
+
+        Includes synthesis/characterization instrument ids the key may push for. 404 when the key has no
+        Gatekeeper.
+        """
+        data = self.get("gatekeepers/current")
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected object from current_gatekeeper, got {type(data)}")
+        return data
+
+    # -- Input queue (Gatekeeper file push) ------------------------------------
+
+    def push_input(
+        self,
+        files: Iterable[str | Path | tuple[str, bytes | BinaryIO | str | Path]],
+        metadata: InputMetadata | dict[str, Any] | str | None = None,
+        *,
+        version: int | None = None,
+    ) -> InputPushResult:
+        """
+        ``POST input`` — push one or more files into the LiST input queue (multipart).
+
+        ``files``: paths, or ``(filename, bytes|file|path)`` tuples. ``metadata`` is ``list-input/1``
+        (:class:`listapi.input.InputMetadata`, a dict, or a JSON string); see ``listapi.input`` for kinds and
+        :meth:`input_schema`. 202 when something new was stored; 200 when every file was already known
+        (``result.all_existing``). Needs InputQueue Create; Gatekeeper keys must use **v2** (the client default).
+
+        400: bad metadata / sha256 mismatch; 403: instrument not on the Gatekeeper; 413: file too large;
+        404: input queue off.
+        """
+        parts = normalize_upload_parts(files)
+        # requests: list of tuples keeps repeated form name ``file``.
+        multipart = [
+            ("file", (name, content, _guess_mime_type(name))) for name, content in parts
+        ]
+        data: dict[str, str] | None = None
+        meta = metadata_json(metadata)
+        if meta is not None:
+            data = {"metadata": meta}
+        url = self._api("input", version=version)
+        resp = self._request("POST", url, files=multipart, data=data, timeout=300)
+        self._raise(resp, "POST input")
+        payload = resp.json()
+        if not isinstance(payload, dict):
+            raise ValueError(f"Expected object from POST input, got {type(payload)}")
+        return InputPushResult.from_response(payload, resp.status_code)
+
+    def get_input_item(self, item_id: int, *, version: int | None = None) -> dict[str, Any]:
+        """``GET input/{id}`` — one item with metadata, corrections and steps (own items, or InputQueue Read)."""
+        data = self.get(f"input/{int(item_id)}", version=version)
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected object from get_input_item, got {type(data)}")
+        return data
+
+    def find_input_items(
+        self,
+        *,
+        submission_id: str | None = None,
+        external_key: str | None = None,
+        version: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        ``GET input?submissionId=|externalKey=`` — own items (or any with InputQueue Read), newest first.
+
+        Exactly one of ``submission_id`` / ``external_key`` is required (server 400 otherwise).
+        """
+        if (submission_id is None) == (external_key is None):
+            raise ValueError("Give exactly one of submission_id or external_key")
+        params: dict[str, str] = {}
+        if submission_id is not None:
+            params["submissionId"] = submission_id
+        if external_key is not None:
+            params["externalKey"] = external_key
+        data = self.get("input", params=params, version=version)
+        if not isinstance(data, list):
+            raise ValueError(f"Expected list from find_input_items, got {type(data)}")
+        return [row for row in data if isinstance(row, dict)]
+
+    def input_ingest_status(self, *, version: int | None = None) -> dict[str, Any]:
+        """
+        ``GET input/ingest-status`` — this sender's bookmark: ``count``, ``latestReceived``, ``countByStatus``.
+        """
+        data = self.get("input/ingest-status", version=version)
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected object from input_ingest_status, got {type(data)}")
+        return data
+
+    def input_schema(self, *, version: int | None = None) -> dict[str, Any]:
+        """``GET input/schema`` — JSON Schema of ``list-input/1`` (kinds enum included)."""
+        data = self.get("input/schema", version=version)
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected object from input_schema, got {type(data)}")
+        return data
+
+    # --- Instrument history --------------------------------------------------
+
+    def instrument_history(
+        self,
+        instrument: str,
+        *,
+        start: str | date | datetime | None = None,
+        end: str | date | datetime | None = None,
+        kinds: Iterable[str] | None = None,
+    ) -> dict[str, Any]:
+        """
+        ``GET synthesis-instruments/{instrument}/history`` — sample runs and events in an optional range.
+
+        ``kinds``: ``SampleRun``, ``Event``, or both (default). Returns ``entries`` and ``canEditEvents``.
+        """
+        params: dict[str, Any] = {}
+        if start is not None:
+            params["from"] = _as_iso(start)
+        if end is not None:
+            params["to"] = _as_iso(end)
+        if kinds is not None:
+            params["kinds"] = list(kinds)
+        data = self.get(
+            f"synthesis-instruments/{quote(instrument, safe='')}/history",
+            params=params or None,
+        )
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected object from instrument_history, got {type(data)}")
+        return data
+
+    def create_instrument_event(
+        self,
+        instrument: str,
+        event: InstrumentEvent | dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        ``POST synthesis-instruments/{instrument}/events`` — record one event (UI-style create).
+
+        Prefer :meth:`push_instrument_events` from an instrument-side script (idempotent by external key).
+        """
+        body = event.to_json() if isinstance(event, InstrumentEvent) else event
+        path = f"synthesis-instruments/{quote(instrument, safe='')}/events"
+        data = self.post(path, json=body)
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected object from create_instrument_event, got {type(data)}")
+        return data
+
+    def update_instrument_event(
+        self,
+        instrument: str,
+        event_id: int,
+        event: InstrumentEvent | dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        ``PUT synthesis-instruments/{instrument}/events/{eventId}`` — change a recorded event.
+
+        External key and API key of a pushed event are kept so the next script push still finds it.
+        """
+        body = event.to_json() if isinstance(event, InstrumentEvent) else event
+        path = f"synthesis-instruments/{quote(instrument, safe='')}/events/{int(event_id)}"
+        data = self.put(path, json=body)
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected object from update_instrument_event, got {type(data)}")
+        return data
 
     def push_instrument_events(
         self,
@@ -1169,12 +1336,14 @@ class Client:
         batch (422), :class:`listapi.instruments.InstrumentPushError` lists every invalid item with its index in
         ``events``; earlier batches stay saved, so fix the items and push again.
 
-        Needs an API key that lists the instrument (or managing it) and the privilege InstrumentHistory.
+        Needs InstrumentHistory Create+Update for the instrument (Gatekeeper key or listed instruments).
         ``events`` are :class:`listapi.instruments.InstrumentEvent` or the API's JSON objects.
         """
         if not 1 <= batch_size <= MAX_EVENTS_PER_PUSH:
             raise ValueError(f"batch_size must be between 1 and {MAX_EVENTS_PER_PUSH}")
-        items = [e.to_json() if isinstance(e, InstrumentEvent) else e for e in events]
+        items = [
+            e.to_json(for_push=True) if isinstance(e, InstrumentEvent) else e for e in events
+        ]
         path = f"synthesis-instruments/{quote(instrument, safe='')}/events"
         total = InstrumentPushResult()
         for offset in range(0, len(items), batch_size):
@@ -1209,6 +1378,12 @@ class Client:
         self._raise(resp, f"DELETE {path}")
         return True
 
+    def delete_instrument_event_by_id(self, instrument: str, event_id: int) -> None:
+        """``DELETE synthesis-instruments/{instrument}/events/{eventId}`` — remove by LiST id."""
+        path = f"synthesis-instruments/{quote(instrument, safe='')}/events/{int(event_id)}"
+        resp = self._request("DELETE", self._api(path))
+        self._raise(resp, f"DELETE {path}")
+
     def instrument_ingest_status(self, instrument: str) -> dict[str, Any]:
         """
         ``GET synthesis-instruments/{instrument}/ingest-status`` — what has been pushed: ``eventCount``,
@@ -1216,6 +1391,13 @@ class Client:
         reading a log where the last push stopped.
         """
         return self.get(f"synthesis-instruments/{quote(instrument, safe='')}/ingest-status")
+
+    def list_instrument_event_types(self) -> list[dict[str, Any]]:
+        """``GET instrument-event-types`` — configured event type ids (MAINT, BAKE, …)."""
+        data = self.get("instrument-event-types")
+        if not isinstance(data, list):
+            raise ValueError(f"Expected list from list_instrument_event_types, got {type(data)}")
+        return [row for row in data if isinstance(row, dict)]
 
 def _json_or_empty(resp: requests.Response) -> dict[str, Any]:
     try:

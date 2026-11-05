@@ -5,9 +5,9 @@ an ``external_key``: the instrument system's id for it, or a stable hash of the 
 LiST creates or updates events by that key, so pushing the same log again is safe; there is nothing to remember
 locally (:meth:`listapi.Client.instrument_ingest_status` tells what was pushed).
 
-Authentication: a role-based API key that lists the instrument (API key dialog, "Instrument history"; admins set
-it up) and whose role has the privilege InstrumentHistory. Needs a LiST server with instrument history ingest
-(``PUT synthesis-instruments/{id}/events``); production LiST does not have it yet.
+Authentication: a Gatekeeper API key (instruments on the Gatekeeper; role with InstrumentHistory Create/Update)
+or a role-based key that lists the instrument. Needs a LiST server with instrument history
+(``PUT/POST synthesis-instruments/{id}/events``).
 
 Example::
 
@@ -18,11 +18,11 @@ Example::
     client = sign_in_api_key("https://list.example.org", api_key)
     start = datetime(2026, 10, 1, 8, 0, tzinfo=timezone.utc)
     event = InstrumentEvent(
-        external_key=stable_key("bakeout", start.isoformat()),
         event_type="BAKE",
         start=start,
-        end=start + timedelta(hours=36),
         title="Bakeout after cell refill",
+        external_key=stable_key("bakeout", start.isoformat()),
+        end=start + timedelta(hours=36),
         description="<p>Cells 3 and 5 refilled.</p>",
     )
     result = client.push_instrument_events("MBE2", [event])
@@ -47,35 +47,45 @@ MAX_EXTERNAL_KEY_LENGTH = 200
 
 @dataclass
 class InstrumentEvent:
-    """One event to push.
+    """One instrument history event (push or UI-style create/update).
 
     ``event_type`` is an event type ID as defined in LiST (Customizing → Instrument event types), e.g. ``MAINT``,
     ``CLEAN``, ``BAKE``, ``CALIB``, ``OTHER``. Give ``end`` or ``duration_hours`` (``end`` wins), or neither for a
     point in time. Naive datetimes are taken as UTC. ``description`` is HTML (LiST sanitizes it like notes);
     ``None`` for none.
+
+    ``external_key`` is required when pushing (:meth:`listapi.Client.push_instrument_events`); omit it for
+    :meth:`listapi.Client.create_instrument_event` / :meth:`listapi.Client.update_instrument_event` (UI-recorded
+    events). On update, the server keeps an existing external key.
     """
 
-    external_key: str
     event_type: str
     start: datetime
     title: str
+    external_key: str | None = None
     end: datetime | None = None
     duration_hours: float | None = None
     description: str | None = None
+    user_id: str | None = None
 
-    def to_json(self) -> dict[str, Any]:
+    def to_json(self, *, for_push: bool = False) -> dict[str, Any]:
+        if for_push and not self.external_key:
+            raise ValueError("external_key is required when pushing instrument events")
         body: dict[str, Any] = {
-            "externalKey": self.external_key,
             "eventTypeID": self.event_type,
             "start": _iso(self.start),
             "title": self.title,
         }
+        if self.external_key is not None:
+            body["externalKey"] = self.external_key
         if self.end is not None:
             body["end"] = _iso(self.end)
         elif self.duration_hours is not None:
             body["durationHours"] = self.duration_hours
         if self.description is not None:
             body["description"] = self.description
+        if self.user_id is not None:
+            body["userID"] = self.user_id
         return body
 
 

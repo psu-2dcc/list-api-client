@@ -21,6 +21,30 @@ from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from listapi.auth import sign_in, sign_in_api_key, sign_in_entra, sign_in_shibboleth
 from listapi.client import Client
 from listapi.errors import ListApiError, SignInCancelled
+from listapi.input import (
+    KIND_ATTACHMENT,
+    KIND_CHARACTERIZATION,
+    KIND_SAMPLE_DEFINITION,
+    KIND_SIMULATION,
+    KIND_SYNTHESIS,
+    KINDS,
+    SCHEMA_V1,
+    STATUS_DISCARDED,
+    STATUS_DONE,
+    STATUS_DUPLICATE,
+    STATUS_FAILED,
+    STATUS_MOVING,
+    STATUS_QUEUED,
+    STATUS_RECEIVED,
+    STATUS_WAITING,
+    STATUS_LABELS,
+    InputFileEntry,
+    InputMetadata,
+    InputPushResult,
+    describe_input_kind,
+    describe_input_status,
+    file_sha256,
+)
 from listapi.instruments import InstrumentEvent, InstrumentPushError, InstrumentPushResult, stable_key
 from listapi.import_status import (
     DEFAULT_IMPORT_STATUSES,
@@ -45,7 +69,7 @@ try:
     __version__ = _pkg_version("listapi")
 except PackageNotFoundError:
     # Source tree without an install (e.g. raw path on sys.path).
-    __version__ = "0.7.0"
+    __version__ = "0.8.0"
 
 __all__ = [
     "Client",
@@ -55,6 +79,28 @@ __all__ = [
     "InstrumentPushError",
     "InstrumentPushResult",
     "stable_key",
+    "InputMetadata",
+    "InputFileEntry",
+    "InputPushResult",
+    "SCHEMA_V1",
+    "KINDS",
+    "KIND_SAMPLE_DEFINITION",
+    "KIND_SYNTHESIS",
+    "KIND_CHARACTERIZATION",
+    "KIND_SIMULATION",
+    "KIND_ATTACHMENT",
+    "STATUS_RECEIVED",
+    "STATUS_QUEUED",
+    "STATUS_MOVING",
+    "STATUS_WAITING",
+    "STATUS_FAILED",
+    "STATUS_DONE",
+    "STATUS_DISCARDED",
+    "STATUS_DUPLICATE",
+    "STATUS_LABELS",
+    "describe_input_status",
+    "describe_input_kind",
+    "file_sha256",
     "sign_in",
     "sign_in_api_key",
     "sign_in_entra",
