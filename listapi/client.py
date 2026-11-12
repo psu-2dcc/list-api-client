@@ -591,8 +591,8 @@ class Client:
         """
         POST /api/v{n}/publications/search — auto-page.
 
-        ``publication_type`` is ``"I"`` (in-house), ``"E"`` (external user) or
-        ``"L"`` (local user); ``science_driver`` is an id from ``publications/science-drivers``.
+        ``publication_type`` is a code from :meth:`get_publication_types` (default data:
+        ``"I"``, ``"E"``, ``"L"``); an unknown code is a 400. ``science_driver`` is an id from ``publications/science-drivers``.
         ``date_from`` / ``date_to`` are inclusive and take ``yyyy``, ``yyyy-MM`` or
         ``yyyy-MM-dd`` (or a ``date``); ``work_type`` is a Crossref work type such as
         ``"journal-article"``. ``drafts_only`` needs the publication update privilege.
@@ -617,7 +617,8 @@ class Client:
         GET /api/v{n}/publications/doi-lookup — Crossref data for a DOI as a draft (nothing is saved).
 
         Returns ``exists`` / ``publicationId``, ``draft`` (a create request: bibliographic
-        fields, authors linked to LiST users, suggested highlights; ``type`` unset),
+        fields, authors linked to LiST users, suggested ``highlight`` author-role codes (see
+        :meth:`get_author_roles`); ``type`` unset),
         ``warnings``, and for an existing publication ``fieldDiffs`` (``field``,
         ``current``, ``proposed``, ``action`` = Apply / Report / Error, ``note``).
         Raises :class:`ListApiError` with 404 when Crossref doesn't know the DOI.
@@ -666,15 +667,41 @@ class Client:
         publication_id: int | None = None,
     ) -> list[dict[str, Any]]:
         """
-        POST /api/v{n}/publications/author-suggestions — match authors to LiST users, suggest highlights.
+        POST /api/v{n}/publications/author-suggestions — match authors to LiST users, suggest ``highlight`` author-role codes.
 
         ``authors``: dicts with any of ``collaboratorId``, ``orcid``, ``given``, ``family``.
         Returns one suggestion per author, in order (suggestions only; a human confirms).
+        ``highlight`` values are codes from :meth:`get_author_roles` (``None`` = plain).
         """
         body = {"publicationId": publication_id, "authors": list(authors)}
         data = self.post("publications/author-suggestions", json=body)
         if not isinstance(data, list):
             raise ValueError(f"Expected list from suggest_authors, got {type(data)}")
+        return data
+
+    def get_publication_types(self, *, include_usage: bool = False) -> list[dict[str, Any]]:
+        """GET /api/v{n}/publications/types -> ``[{id, code, label}]`` (+ ``isUsed``).
+
+        Facility data: the list can be empty, in which case a publication's ``type`` is
+        ``None``. ``code`` is what ``type`` / ``publication_type`` take. A 404 (LiST without
+        the endpoint) propagates as :class:`ListApiError`.
+        """
+        return self._get_code_list("publications/types", include_usage, "get_publication_types")
+
+    def get_author_roles(self, *, include_usage: bool = False) -> list[dict[str, Any]]:
+        """GET /api/v{n}/publications/author-roles -> ``[{id, code, label, style, suggestsSeniorPersonnel}]``.
+
+        Facility data: the list can be empty, in which case ``authorList[].highlight`` is
+        ``None``. ``code`` is what ``highlight`` takes; ``style`` is bold / italic / underline.
+        A 404 (LiST without the endpoint) propagates as :class:`ListApiError`.
+        """
+        return self._get_code_list("publications/author-roles", include_usage, "get_author_roles")
+
+    def _get_code_list(self, path: str, include_usage: bool, caller: str) -> list[dict[str, Any]]:
+        params = {"includeUsage": "true"} if include_usage else None
+        data = self.get(path, params=params)
+        if not isinstance(data, list):
+            raise ValueError(f"Expected list from {caller}, got {type(data)}")
         return data
 
     def get_publication_data_packages(self, id_or_doi: str | int) -> list[dict[str, Any]]:

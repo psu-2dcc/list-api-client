@@ -244,7 +244,7 @@ def main() -> None:
     ) -> str:
         """
         Search publications by free text and/or element symbols (e.g. ["Mo","S"]).
-        publication_type: "I" (in-house), "E" (external user), "L" (local user).
+        publication_type: a code from list_publication_types (default data: "I", "E", "L").
         With no filters, returns all readable publications.
         """
         try:
@@ -263,6 +263,22 @@ def main() -> None:
                 "publications": truncated,
             }
         )
+
+    @mcp.tool()
+    def list_publication_types() -> str:
+        """Publication type codes (id, code, label) valid for find_publications; may be empty."""
+        try:
+            return _json(client.get_publication_types())
+        except ListApiError as exc:
+            return _json({"error": str(exc)})
+
+    @mcp.tool()
+    def list_author_roles() -> str:
+        """Author role codes (code, label, style) used as authorList[].highlight; may be empty."""
+        try:
+            return _json(client.get_author_roles())
+        except ListApiError as exc:
+            return _json({"error": str(exc)})
 
     @mcp.tool()
     def get_publication(id_or_doi: str) -> str:

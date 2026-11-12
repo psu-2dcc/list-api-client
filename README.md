@@ -317,12 +317,14 @@ Example: `examples/upload_with_metadata.py ACTIVITY_ID FILE --meta Technique=XRD
 |--------|--------|
 | `list_publications()` | Every publication you can read |
 | `get_publication(id_or_doi)` | Numeric id or DOI |
-| `find_publications(*, search_text=None, elements=None, materials=None, publication_type=None, science_driver=None, date_from=None, date_to=None, work_type=None, drafts_only=False, instrument_doi=None)` | Auto-paged search; `publication_type` is `"I"` / `"E"` / `"L"`; dates as `yyyy[-MM[-dd]]` |
+| `get_publication_types(*, include_usage=False)` | `[{id, code, label}]`; codes for `type` / `publication_type`; facility data, can be empty (then `type` is `null`) |
+| `get_author_roles(*, include_usage=False)` | `[{id, code, label, style, suggestsSeniorPersonnel}]`; codes for `authorList[].highlight`; can be empty (then `highlight` is `null`) |
+| `find_publications(*, search_text=None, elements=None, materials=None, publication_type=None, science_driver=None, date_from=None, date_to=None, work_type=None, drafts_only=False, instrument_doi=None)` | Auto-paged search; `publication_type` is a code from `get_publication_types()` (default data: `I`, `E`, `L`); dates as `yyyy[-MM[-dd]]` |
 | `get_publication_data_packages(id_or_doi)` | Data packages attached to a publication |
 | `lookup_doi(doi, *, include_raw=False)` | Crossref data as a draft (nothing saved); for existing publications `fieldDiffs` with Apply / Report / Error |
 | `create_publication(request)` / `update_publication(request)` | Create (`submit: false` = draft) / full update (`id` in the request); `metadataFromCrossref: true` records a Crossref sync with the save |
 | `render_publication(request)` | Server-rendered `authors` / `cite` preview |
-| `suggest_authors(authors, *, publication_id=None)` | Match authors to LiST users, suggest highlights |
+| `suggest_authors(authors, *, publication_id=None)` | Match authors to LiST users, suggest `highlight` author-role codes |
 
 `lookup_doi`, `metadataFromCrossref`, `render_publication`, `suggest_authors` and the
 date / author / funding fields need a LiST server with the extended publication API
