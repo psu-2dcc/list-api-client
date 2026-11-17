@@ -7,13 +7,20 @@ import mimetypes
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Literal
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import requests
 
 from listapi import ids
 from listapi._jwt import post_for_jwt
 from listapi.errors import ListApiError
+from listapi.input import InputMetadata, InputNamespace, PushResult
+from listapi.instruments import (
+    MAX_EVENTS_PER_PUSH,
+    InstrumentEvent,
+    InstrumentPushError,
+    InstrumentPushResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +62,9 @@ class Client:
         if api_key:
             self._session.headers["X-API-Key"] = api_key
         self._session.headers.setdefault("Accept", "application/json")
+        #: Input queue (Gatekeeper pushes): ``client.input.push(...)``; see :mod:`listapi.input`.
+        self.input = InputNamespace(self)
+        self._server_info: dict[str, Any] | None = None
 
     def refresh(self) -> bool:
         """
@@ -105,6 +115,7 @@ class Client:
         if self._jwt_near_expiry():
             self.refresh()
         logger.debug("%s %s", method.upper(), url)
+        kwargs.setdefault("allow_redirects", False)  # surfaced by _raise as RedirectError
         resp = self._session.request(method, url, timeout=timeout, **kwargs)
         if resp.status_code == 401 and self.jwt and self.refresh():
             logger.debug("401 on %s %s; refreshed JWT and retrying once", method.upper(), url)
@@ -112,7 +123,7 @@ class Client:
         return resp
 
     def _raise(self, resp: requests.Response, what: str) -> None:
-        if resp.ok:
+        if resp.ok and not 300 <= resp.status_code < 400:
             return
         raise ListApiError.from_response(resp, what)
 
@@ -150,6 +161,22 @@ class Client:
             return resp.json()
         except ValueError:
             return resp
+
+    def server_info(self, *, refresh: bool = False) -> dict[str, Any]:
+        """
+        Which LiST build this is: ``GET api/v1/system-config`` (anonymous) ``build`` block —
+        ``branch``, ``commitHash``, ``buildDate``, ``version`` — plus ``environment``. Cached per
+        client; ``refresh=True`` asks again. The build's ``version`` is not a feature level (production
+        reports ``1.0.0``); use feature checks such as ``client.input.supported()``.
+        """
+        if self._server_info is None or refresh:
+            data = self.get("system-config", version=1)
+            if not isinstance(data, dict):
+                raise ValueError(f"Expected object from system-config, got {type(data)}")
+            info = dict(data.get("build") or {})
+            info["environment"] = data.get("environment")
+            self._server_info = info
+        return dict(self._server_info)
 
     def whoami(self) -> dict[str, Any]:
         """
@@ -579,8 +606,8 @@ class Client:
         """
         POST /api/v{n}/publications/search — auto-page.
 
-        ``publication_type`` is ``"I"`` (in-house), ``"E"`` (external user) or
-        ``"L"`` (local user); ``science_driver`` is an id from ``publications/science-drivers``.
+        ``publication_type`` is a code from :meth:`get_publication_types` (default data:
+        ``"I"``, ``"E"``, ``"L"``); an unknown code is a 400. ``science_driver`` is an id from ``publications/science-drivers``.
         ``date_from`` / ``date_to`` are inclusive and take ``yyyy``, ``yyyy-MM`` or
         ``yyyy-MM-dd`` (or a ``date``); ``work_type`` is a Crossref work type such as
         ``"journal-article"``. ``drafts_only`` needs the publication update privilege.
@@ -605,7 +632,8 @@ class Client:
         GET /api/v{n}/publications/doi-lookup — Crossref data for a DOI as a draft (nothing is saved).
 
         Returns ``exists`` / ``publicationId``, ``draft`` (a create request: bibliographic
-        fields, authors linked to LiST users, suggested highlights; ``type`` unset),
+        fields, authors linked to LiST users, suggested ``highlight`` author-role codes (see
+        :meth:`get_author_roles`); ``type`` unset),
         ``warnings``, and for an existing publication ``fieldDiffs`` (``field``,
         ``current``, ``proposed``, ``action`` = Apply / Report / Error, ``note``).
         Raises :class:`ListApiError` with 404 when Crossref doesn't know the DOI.
@@ -654,15 +682,41 @@ class Client:
         publication_id: int | None = None,
     ) -> list[dict[str, Any]]:
         """
-        POST /api/v{n}/publications/author-suggestions — match authors to LiST users, suggest highlights.
+        POST /api/v{n}/publications/author-suggestions — match authors to LiST users, suggest ``highlight`` author-role codes.
 
         ``authors``: dicts with any of ``collaboratorId``, ``orcid``, ``given``, ``family``.
         Returns one suggestion per author, in order (suggestions only; a human confirms).
+        ``highlight`` values are codes from :meth:`get_author_roles` (``None`` = plain).
         """
         body = {"publicationId": publication_id, "authors": list(authors)}
         data = self.post("publications/author-suggestions", json=body)
         if not isinstance(data, list):
             raise ValueError(f"Expected list from suggest_authors, got {type(data)}")
+        return data
+
+    def get_publication_types(self, *, include_usage: bool = False) -> list[dict[str, Any]]:
+        """GET /api/v{n}/publications/types -> ``[{id, code, label}]`` (+ ``isUsed``).
+
+        Facility data: the list can be empty, in which case a publication's ``type`` is
+        ``None``. ``code`` is what ``type`` / ``publication_type`` take. A 404 (LiST without
+        the endpoint) propagates as :class:`ListApiError`.
+        """
+        return self._get_code_list("publications/types", include_usage, "get_publication_types")
+
+    def get_author_roles(self, *, include_usage: bool = False) -> list[dict[str, Any]]:
+        """GET /api/v{n}/publications/author-roles -> ``[{id, code, label, style, suggestsSeniorPersonnel}]``.
+
+        Facility data: the list can be empty, in which case ``authorList[].highlight`` is
+        ``None``. ``code`` is what ``highlight`` takes; ``style`` is bold / italic / underline.
+        A 404 (LiST without the endpoint) propagates as :class:`ListApiError`.
+        """
+        return self._get_code_list("publications/author-roles", include_usage, "get_author_roles")
+
+    def _get_code_list(self, path: str, include_usage: bool, caller: str) -> list[dict[str, Any]]:
+        params = {"includeUsage": "true"} if include_usage else None
+        data = self.get(path, params=params)
+        if not isinstance(data, list):
+            raise ValueError(f"Expected list from {caller}, got {type(data)}")
         return data
 
     def get_publication_data_packages(self, id_or_doi: str | int) -> list[dict[str, Any]]:
@@ -940,6 +994,9 @@ class Client:
         description: str | None = None,
         metadata: dict[str, Any] | None = None,
         visibility: str | None = None,
+        source_file_ids: Iterable[int] | None = None,
+        processing_method: str | None = None,
+        processing_relation: str | None = None,
     ) -> dict[str, Any]:
         """
         POST /api/v{n}/sample-activities/{id}/files/upload (plain attachment).
@@ -949,9 +1006,14 @@ class Client:
         to set the column type too. ``visibility``: ``P`` (on publication),
         ``U`` (PI only) or ``I`` (internal). Returns the file-group metadata.
 
-        Re-uploading under an existing basename adds a version to that group and
-        the server ignores ``description`` / ``visibility`` / ``metadata``; use
-        :meth:`update_file_metadata` for those.
+        Re-uploading under an existing basename adds a version to that group; the
+        ``description`` / ``visibility`` / ``metadata`` given now are applied to the
+        existing group too (:meth:`update_file_metadata` changes them later).
+
+        Processed data: ``source_file_ids`` are the ids of the files it was derived from,
+        ``processing_method`` how (e.g. "peak fit in Origin 2024"), ``processing_relation`` how it relates
+        to the sources: ``Conversion`` (same data, other format), ``Extraction`` (a subset) or
+        ``Analysis`` (new results). The method and relation need ``source_file_ids`` (else 400).
         """
         return self._upload_multipart(
             activity,
@@ -961,6 +1023,9 @@ class Client:
             description=description,
             metadata=metadata,
             visibility=visibility,
+            source_file_ids=source_file_ids,
+            processing_method=processing_method,
+            processing_relation=processing_relation,
         )
 
     def _upload_multipart(
@@ -973,6 +1038,9 @@ class Client:
         description: str | None,
         metadata: dict[str, Any] | None = None,
         visibility: str | None = None,
+        source_file_ids: Iterable[int] | None = None,
+        processing_method: str | None = None,
+        processing_relation: str | None = None,
     ) -> dict[str, Any]:
         aid = ids.activity_id(activity)
         name, content = _read_upload_source(source, filename=filename)
@@ -985,6 +1053,13 @@ class Client:
         if visibility is not None:
             # Form binding parses the enum member name, not the P/U/I wire value.
             data.append(("Visibility", _VISIBILITY_FORM_NAMES[_visibility_code(visibility)]))
+        # Processed data: repeated key binds a List<int>. Names follow the form's PascalCase.
+        for source_id in source_file_ids or ():
+            data.append(("SourceFileIds", str(int(source_id))))
+        if processing_method:
+            data.append(("ProcessingMethod", processing_method))
+        if processing_relation:
+            data.append(("ProcessingRelation", processing_relation))
         # ASP.NET binds list items from indexed keys: Fields[0].Label, Fields[0].Value, ...
         for i, field in enumerate(_metadata_fields(metadata)):
             for key, value in field.items():
@@ -1146,6 +1221,193 @@ class Client:
             return data
         self._raise(resp, "POST sample-import")
         raise AssertionError("unreachable")
+    # -- Gatekeeper -----------------------------------------------------------
+
+    def current_gatekeeper(self) -> dict[str, Any]:
+        """
+        ``GET gatekeepers/current`` — the Gatekeeper this API key belongs to.
+
+        Includes synthesis/characterization instrument ids the key may push for. 404 when the key has no
+        Gatekeeper.
+        """
+        data = self.get("gatekeepers/current")
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected object from current_gatekeeper, got {type(data)}")
+        return data
+
+    # -- Input queue: thin aliases for the pre-``client.input`` names ---------------------------
+
+    def push_input(self, files: Iterable[Any], metadata: Any = None) -> PushResult:
+        """Alias of :meth:`listapi.input.InputNamespace.push` (``client.input.push``)."""
+        return self.input.push(files, metadata)
+
+    def get_input_item(self, item_id: int) -> dict[str, Any]:
+        """Alias of ``client.input.get``."""
+        return self.input.get(item_id)
+
+    def find_input_items(
+        self, *, submission_id: str | None = None, external_key: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Alias of ``client.input.find``."""
+        return self.input.find(submission_id=submission_id, external_key=external_key)
+
+    def input_ingest_status(self) -> dict[str, Any]:
+        """Alias of ``client.input.status``."""
+        return self.input.status()
+
+    def input_schema(self) -> dict[str, Any]:
+        """Alias of ``client.input.schema``."""
+        return self.input.schema()
+
+    # --- Instrument history --------------------------------------------------
+
+    def instrument_history(
+        self,
+        instrument: str,
+        *,
+        start: str | date | datetime | None = None,
+        end: str | date | datetime | None = None,
+        kinds: Iterable[str] | None = None,
+    ) -> dict[str, Any]:
+        """
+        ``GET synthesis-instruments/{instrument}/history`` — sample runs and events in an optional range.
+
+        ``kinds``: ``SampleRun``, ``Event``, or both (default). Returns ``entries`` and ``canEditEvents``.
+        """
+        params: dict[str, Any] = {}
+        if start is not None:
+            params["from"] = _as_iso(start)
+        if end is not None:
+            params["to"] = _as_iso(end)
+        if kinds is not None:
+            params["kinds"] = list(kinds)
+        data = self.get(
+            f"synthesis-instruments/{quote(instrument, safe='')}/history",
+            params=params or None,
+        )
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected object from instrument_history, got {type(data)}")
+        return data
+
+    def create_instrument_event(
+        self,
+        instrument: str,
+        event: InstrumentEvent | dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        ``POST synthesis-instruments/{instrument}/events`` — record one event (UI-style create).
+
+        Prefer :meth:`push_instrument_events` from an instrument-side script (idempotent by external key).
+        """
+        body = event.to_json() if isinstance(event, InstrumentEvent) else event
+        path = f"synthesis-instruments/{quote(instrument, safe='')}/events"
+        data = self.post(path, json=body)
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected object from create_instrument_event, got {type(data)}")
+        return data
+
+    def update_instrument_event(
+        self,
+        instrument: str,
+        event_id: int,
+        event: InstrumentEvent | dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        ``PUT synthesis-instruments/{instrument}/events/{eventId}`` — change a recorded event.
+
+        External key and API key of a pushed event are kept so the next script push still finds it.
+        """
+        body = event.to_json() if isinstance(event, InstrumentEvent) else event
+        path = f"synthesis-instruments/{quote(instrument, safe='')}/events/{int(event_id)}"
+        data = self.put(path, json=body)
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected object from update_instrument_event, got {type(data)}")
+        return data
+
+    def push_instrument_events(
+        self,
+        instrument: str,
+        events: Iterable[InstrumentEvent | dict[str, Any]],
+        *,
+        batch_size: int = MAX_EVENTS_PER_PUSH,
+    ) -> InstrumentPushResult:
+        """
+        ``PUT synthesis-instruments/{instrument}/events`` — create or update events by external key.
+
+        Pushing the same events again is safe: unchanged ones are reported as unchanged. Lists longer than
+        ``batch_size`` (at most 1000) go in several requests; each batch is all or nothing. If LiST refuses a
+        batch (422), :class:`listapi.instruments.InstrumentPushError` lists every invalid item with its index in
+        ``events``; earlier batches stay saved, so fix the items and push again.
+
+        Needs InstrumentHistory Create+Update for the instrument (Gatekeeper key or listed instruments).
+        ``events`` are :class:`listapi.instruments.InstrumentEvent` or the API's JSON objects.
+        """
+        if not 1 <= batch_size <= MAX_EVENTS_PER_PUSH:
+            raise ValueError(f"batch_size must be between 1 and {MAX_EVENTS_PER_PUSH}")
+        items = [
+            e.to_json(for_push=True) if isinstance(e, InstrumentEvent) else e for e in events
+        ]
+        path = f"synthesis-instruments/{quote(instrument, safe='')}/events"
+        total = InstrumentPushResult()
+        for offset in range(0, len(items), batch_size):
+            resp = self._request("PUT", self._api(path), json={"events": items[offset : offset + batch_size]})
+            if resp.status_code == 422:
+                body = _json_or_empty(resp)
+                errors = [{**e, "index": e.get("index", 0) + offset} for e in body.get("errors", [])]
+                raise InstrumentPushError(
+                    f"PUT {path} refused (422): {body.get('message') or resp.reason}",
+                    errors,
+                    status_code=422,
+                    response=resp,
+                )
+            self._raise(resp, f"PUT {path}")
+            data = resp.json()
+            total.created += data.get("created", 0)
+            total.updated += data.get("updated", 0)
+            total.unchanged += data.get("unchanged", 0)
+            total.results += [{**r, "index": r.get("index", 0) + offset} for r in data.get("results", [])]
+        return total
+
+    def delete_instrument_event(self, instrument: str, external_key: str) -> bool:
+        """
+        ``DELETE synthesis-instruments/{instrument}/events/by-key?externalKey=…`` — remove a pushed event.
+
+        Returns False if there is no event with that key.
+        """
+        path = f"synthesis-instruments/{quote(instrument, safe='')}/events/by-key"
+        resp = self._request("DELETE", self._api(path), params={"externalKey": external_key})
+        if resp.status_code == 404:
+            return False
+        self._raise(resp, f"DELETE {path}")
+        return True
+
+    def delete_instrument_event_by_id(self, instrument: str, event_id: int) -> None:
+        """``DELETE synthesis-instruments/{instrument}/events/{eventId}`` — remove by LiST id."""
+        path = f"synthesis-instruments/{quote(instrument, safe='')}/events/{int(event_id)}"
+        resp = self._request("DELETE", self._api(path))
+        self._raise(resp, f"DELETE {path}")
+
+    def instrument_ingest_status(self, instrument: str) -> dict[str, Any]:
+        """
+        ``GET synthesis-instruments/{instrument}/ingest-status`` — what has been pushed: ``eventCount``,
+        ``latestEventStart``, ``latestEventChange`` (server time; null when nothing was pushed). Use it to resume
+        reading a log where the last push stopped.
+        """
+        return self.get(f"synthesis-instruments/{quote(instrument, safe='')}/ingest-status")
+
+    def list_instrument_event_types(self) -> list[dict[str, Any]]:
+        """``GET instrument-event-types`` — configured event type ids (MAINT, BAKE, …)."""
+        data = self.get("instrument-event-types")
+        if not isinstance(data, list):
+            raise ValueError(f"Expected list from list_instrument_event_types, got {type(data)}")
+        return [row for row in data if isinstance(row, dict)]
+
+def _json_or_empty(resp: requests.Response) -> dict[str, Any]:
+    try:
+        data = resp.json()
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _sample_search_body(

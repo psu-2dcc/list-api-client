@@ -52,7 +52,7 @@ Bump **`version` in [`pyproject.toml`](pyproject.toml)** for every release (semv
 Pin a release from GitHub with a tag (preferred over floating `main`):
 
 ```bash
-pip install "git+https://github.com/psu-2dcc/list-api-client.git@v0.7.0"
+pip install "git+https://github.com/psu-2dcc/list-api-client.git@v0.8.0"
 ```
 
 Create the matching git tag when you publish (`v0.7.0` for version `0.7.0`).
@@ -81,7 +81,7 @@ client = sign_in(url="https://list.2dccmip.org/list/dotnet", api_key="…")
 
 | Mode | When |
 |------|------|
-| **API key** | Non-empty key from arg / `LIST_API_KEY` / config. Calls `POST /auth/jwt/api`, then sends `X-API-Key` (and Bearer JWT when obtained) on **every** request. |
+| **API key** | Non-empty key from arg / `LIST_API_KEY` / config. Sends `X-API-Key` on **every** request; no JWT exchange (`auth/jwt/api` refuses API keys). |
 | **Entra** | No API key, `method="entra"` (default) or `LIST_AUTH_METHOD=entra`. Needs `listapi[entra]`. Browser by default; `sign_in(entra="device")` or `LIST_ENTRA_MODE=device` for SSH. MSAL cache: `~/.list/msal_cache.bin`. |
 | **Shibboleth** | No API key, `method="shibboleth"` or `LIST_AUTH_METHOD=shibboleth`. Opens a browser to your institution's login if needed, then asks you to confirm the sign-in for the shown account and local port (PKCE-protected, so it is never silent); needs a LiST server with the `auth/shibboleth-cli` / `auth/jwt/shib` endpoints. |
 
@@ -136,6 +136,48 @@ Public imports: `from listapi import sign_in, Client, ListApiError` (plus import
 | `Client(base_url, api_key=None, jwt=None, api_version=2, jwt_expiration=None)` | Direct construction if you already have credentials |
 | `client.refresh()` | Exchange the current JWT for a new one (`POST auth/jwt/api`); returns `False` if there's nothing to refresh or it fails |
 | `client.whoami()` | `GET api/v1/users/current` — `Id`, `Login`, `Eppn`, `AuthMethod` (`msal`/`shibboleth`/absent), roles, etc. for whoever is actually signed in |
+
+### Gatekeeper: input queue and instrument history
+
+Needs a LiST build with the input queue / instrument history APIs. Gatekeeper keys (no internal API) must use
+**api/v2** — the client default.
+
+**Input queue** — push files into `.input-queue` for LiST to place ([docs/input-queue.md](docs/input-queue.md),
+`examples/input_push.py`). The Gatekeeper key is sent on every call (no JWT exchange); the client tells LiST each
+file's **role** (`sample-definition`, `recipe`, `log`, `data`, `characterization`) and never decides synthesis vs.
+characterization:
+
+```python
+client = sign_in(url, api_key=gatekeeper_key)
+client.input.push([("run1.rcp", "recipe"), ("run1.bin", "log")], metadata={"instrument": "MBE2", "user": orcid})
+```
+
+| Method / symbol | Notes |
+|-----------------|--------|
+| `client.input.push(files, metadata)` | `POST input`: one request, sha256 per file, streamed, default `externalKey` `{instrument}/{role}/{fileName}` (`{instrument}/{run.key}/…` with a run key), retries on network/5xx; `PushResult(submission_id, items, created)` (202 → `created`, 200 → not) |
+| `client.input.push_folder(path, instrument, role_by_glob)` | One request per run folder; skips files `exists` reports known |
+| `client.input.exists(items)` | Is `externalKey` + `sha256` already pushed? (≤ 500 per call, split automatically) |
+| `client.input.status()` / `get(id)` / `find(submission_id=… \| external_key=…)` | Bookmark; own items |
+| `client.input.schema()` | JSON Schema of `list-input/1` |
+| `client.input.wait(submission_id, timeout)` | Poll until no item is received/queued/moving |
+| `InputMetadata`, `InputRun`, `PushFile`, `ROLES`, `STATUS_*` | Typed metadata (absent values omitted) and constants |
+| `BadRequestError` / `ForbiddenError` / `NotFoundError` / `PayloadTooLargeError` / `RoleUnknown` | `ListApiError` subclasses (400 / 403 / 404 / 413 / local) with `status_code`, `detail` |
+| `client.server_info()` / `client.input.supported()` | Server build (`system-config`); whether it has the input queue. Without it, `client.input` calls raise `FeatureNotSupported` before uploading anything |
+| `client.current_gatekeeper()` | Instruments this key may push for (`GET gatekeepers/current`) |
+
+The old `push_input`, `get_input_item`, `find_input_items`, `input_ingest_status`, `input_schema` remain as aliases.
+
+**Instrument history** ([docs/instrument-history.md](docs/instrument-history.md), `examples/instrument_log_push.py`):
+
+| Method | Notes |
+|--------|--------|
+| `client.push_instrument_events(instrument, events, *, batch_size=1000)` | Create/update by external key; idempotent; `InstrumentPushError` on 422 |
+| `client.create_instrument_event` / `update_instrument_event` | UI-style single-event write |
+| `client.instrument_history(instrument, *, start=, end=, kinds=)` | Sample runs + events |
+| `client.delete_instrument_event` / `delete_instrument_event_by_id` | By external key or LiST id |
+| `client.instrument_ingest_status(instrument)` | Pushed event count, latest start and change |
+| `client.list_instrument_event_types()` | Configured type ids |
+| `listapi.instruments.stable_key(*parts, prefix=None)` | Stable external key from a log entry |
 
 ### Generic HTTP (any Swagger route)
 
@@ -288,12 +330,14 @@ Example: `examples/upload_with_metadata.py ACTIVITY_ID FILE --meta Technique=XRD
 |--------|--------|
 | `list_publications()` | Every publication you can read |
 | `get_publication(id_or_doi)` | Numeric id or DOI |
-| `find_publications(*, search_text=None, elements=None, materials=None, publication_type=None, science_driver=None, date_from=None, date_to=None, work_type=None, drafts_only=False, instrument_doi=None)` | Auto-paged search; `publication_type` is `"I"` / `"E"` / `"L"`; dates as `yyyy[-MM[-dd]]` |
+| `get_publication_types(*, include_usage=False)` | `[{id, code, label}]`; codes for `type` / `publication_type`; facility data, can be empty (then `type` is `null`) |
+| `get_author_roles(*, include_usage=False)` | `[{id, code, label, style, suggestsSeniorPersonnel}]`; codes for `authorList[].highlight`; can be empty (then `highlight` is `null`) |
+| `find_publications(*, search_text=None, elements=None, materials=None, publication_type=None, science_driver=None, date_from=None, date_to=None, work_type=None, drafts_only=False, instrument_doi=None)` | Auto-paged search; `publication_type` is a code from `get_publication_types()` (default data: `I`, `E`, `L`); dates as `yyyy[-MM[-dd]]` |
 | `get_publication_data_packages(id_or_doi)` | Data packages attached to a publication |
 | `lookup_doi(doi, *, include_raw=False)` | Crossref data as a draft (nothing saved); for existing publications `fieldDiffs` with Apply / Report / Error |
 | `create_publication(request)` / `update_publication(request)` | Create (`submit: false` = draft) / full update (`id` in the request); `metadataFromCrossref: true` records a Crossref sync with the save |
 | `render_publication(request)` | Server-rendered `authors` / `cite` preview |
-| `suggest_authors(authors, *, publication_id=None)` | Match authors to LiST users, suggest highlights |
+| `suggest_authors(authors, *, publication_id=None)` | Match authors to LiST users, suggest `highlight` author-role codes |
 
 `lookup_doi`, `metadataFromCrossref`, `render_publication`, `suggest_authors` and the
 date / author / funding fields need a LiST server with the extended publication API

@@ -6,6 +6,7 @@ Used by both :mod:`listapi.auth` (initial sign-in) and :mod:`listapi.client`
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urljoin
@@ -63,11 +64,24 @@ def post_for_jwt(
     if bearer:
         headers["Authorization"] = f"Bearer {bearer}"
     try:
-        resp = requests.post(url, headers=headers, json=json_body, timeout=60, cookies={})
+        resp = requests.post(
+            url, headers=headers, json=json_body, timeout=60, cookies={}, allow_redirects=False
+        )
     except requests.RequestException as exc:
         msg = f"POST {url} request error: {exc}"
         if raise_on_error:
             raise RuntimeError(msg) from exc
+        return None, None
+
+    if 300 <= resp.status_code < 400:
+        msg = (
+            f"POST {url} was redirected ({resp.status_code}) to "
+            f"{resp.headers.get('Location') or '(no Location header)'} - "
+            "use that host/path as the LiST base URL (redirects are not followed)."
+        )
+        if raise_on_error:
+            raise RuntimeError(msg)
+        print(msg, file=sys.stderr)
         return None, None
 
     if not resp.ok:

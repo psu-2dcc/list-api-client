@@ -11,3 +11,11 @@ config/list.py
 .msal_cache.bin
 *.log
 .DS_Store
+
+# Editors
+.idea/
+.vscode/
+
+# Local output from scripts
+recipes/
+data.anonymous
