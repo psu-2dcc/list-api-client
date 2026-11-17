@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any, BinaryIO, Iterable, Mapping, Sequence
 import requests
 
 from listapi._multipart import Source, build
-from listapi.errors import RoleUnknown
+from listapi.errors import FeatureNotSupported, RoleUnknown
 
 if TYPE_CHECKING:  # pragma: no cover
     from listapi.client import Client
@@ -474,6 +474,50 @@ class InputNamespace:
         self.retries = retries
         #: First backoff delay in seconds (doubles each attempt).
         self.backoff = backoff
+        #: Probe the server once (``GET input/schema``) and refuse early on a build without the queue.
+        self.check_server = True
+        self._supported: bool | None = None
+
+    # -- server support ---------------------------------------------------------------------
+
+    def supported(self) -> bool | None:
+        """Does this server build have the input queue? Probes ``GET input/schema`` once and caches it.
+
+        ``True``: the build has it (the queue can still be switched off in its config; a push then
+        answers 404 "The input queue is off"). ``False``: the build has no input API (404). ``None``:
+        could not tell (network error, other status); calls are then attempted anyway.
+        """
+        if self._supported is None:
+            try:
+                resp = self._client._request("GET", self._client._api("input/schema"), timeout=30)
+            except requests.RequestException:
+                return None
+            if resp.status_code == 200:
+                self._supported = True
+            elif resp.status_code == 404:
+                self._supported = False
+            else:
+                return None
+        return self._supported
+
+    def _require(self) -> None:
+        if not self.check_server or self.supported() is not False:
+            return
+        try:
+            info = self._client.server_info()
+        except Exception:  # the message is only richer with it
+            info = {}
+        build = ""
+        if info.get("branch") or info.get("commitHash"):
+            build = (
+                f" ({info.get('branch') or '?'} @ {info.get('commitHash') or '?'}"
+                f", built {info.get('buildDate') or '?'})"
+            )
+        raise FeatureNotSupported(
+            f"This LiST server{build} has no input queue (GET api/v{self._client.api_version}/input/schema "
+            "answered 404). It needs a build with the input queue.",
+            server=info,
+        )
 
     # -- push -----------------------------------------------------------------------------------
 
@@ -505,6 +549,11 @@ class InputNamespace:
         if not specs:
             raise ValueError("push needs at least one file")
         meta = _metadata_dict(metadata)
+        for spec in specs:
+            check_role(spec.role)
+        for entry in meta.get("files") or []:
+            check_role(entry.get("role") if isinstance(entry, dict) else None)
+        self._require()  # after the local checks, before reading any file
         provided = {e.get("name"): e for e in meta.get("files") or [] if isinstance(e, dict)}
         instrument = meta.get("instrument")
         request_key = meta.get("externalKey")
@@ -677,6 +726,8 @@ class InputNamespace:
     # -- plumbing -------------------------------------------------------------------------------
 
     def _call(self, method: str, path: str, **kwargs: Any) -> Any:
+        if path != "input/schema":
+            self._require()
         timeout = kwargs.pop("timeout", 120)
 
         def send() -> requests.Response:

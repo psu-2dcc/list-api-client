@@ -28,6 +28,19 @@ API keys) and Entra is not tried. Gatekeeper keys work on **api/v2** only (v1 an
 Gatekeeper's instruments (403 otherwise). `client.get/post/...` use the client's `api_version` (default 2);
 v1-only helpers such as `whoami()` or `list_projects()` will be refused for such a key.
 
+## Which server?
+
+The input queue only exists on builds that have it (and it is off by default in the server config).
+`client.server_info()` reports the build (`branch`, `commitHash`, `buildDate`, `version`, `environment`) from the
+anonymous `system-config`; the build `version` is not a feature level, so the client asks the feature itself:
+
+- `client.input.supported()` probes `GET input/schema` once: `True` (build has it), `False` (404: no input API),
+  `None` (could not tell).
+- On `False`, every `client.input` call raises `FeatureNotSupported` **before** anything is read or uploaded, with the
+  server's branch and commit in the message. On `None` the call is attempted anyway.
+- A build that has the queue but has it switched off answers the push with `NotFoundError` ("The input queue is off").
+- `client.input.check_server = False` skips the probe.
+
 ## `client.input`
 
 | Method | HTTP |

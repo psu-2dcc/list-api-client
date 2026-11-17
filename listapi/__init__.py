@@ -22,6 +22,7 @@ from listapi.auth import sign_in, sign_in_api_key, sign_in_entra, sign_in_shibbo
 from listapi.client import Client
 from listapi.errors import (
     BadRequestError,
+    FeatureNotSupported,
     ForbiddenError,
     ListApiError,
     NotFoundError,
@@ -96,6 +97,7 @@ __all__ = [
     "InstrumentPushResult",
     "stable_key",
     "BadRequestError",
+    "FeatureNotSupported",
     "ForbiddenError",
     "NotFoundError",
     "PayloadTooLargeError",

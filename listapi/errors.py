@@ -92,6 +92,14 @@ class PayloadTooLargeError(ListApiError):
     """413: a file is larger than the server's limit (default 2048 MB)."""
 
 
+class FeatureNotSupported(ListApiError):
+    """The server build has no such feature (raised before the call; ``server`` holds its build info)."""
+
+    def __init__(self, message: str, *, server: dict | None = None) -> None:
+        super().__init__(message, status_code=404)
+        self.server = server or {}
+
+
 class RoleUnknown(ListApiError, ValueError):
     """A ``files[].role`` that is not one of :data:`listapi.input.ROLES` (raised before any request)."""
 

@@ -162,6 +162,7 @@ client.input.push([("run1.rcp", "recipe"), ("run1.bin", "log")], metadata={"inst
 | `client.input.wait(submission_id, timeout)` | Poll until no item is received/queued/moving |
 | `InputMetadata`, `InputRun`, `PushFile`, `ROLES`, `STATUS_*` | Typed metadata (absent values omitted) and constants |
 | `BadRequestError` / `ForbiddenError` / `NotFoundError` / `PayloadTooLargeError` / `RoleUnknown` | `ListApiError` subclasses (400 / 403 / 404 / 413 / local) with `status_code`, `detail` |
+| `client.server_info()` / `client.input.supported()` | Server build (`system-config`); whether it has the input queue. Without it, `client.input` calls raise `FeatureNotSupported` before uploading anything |
 | `client.current_gatekeeper()` | Instruments this key may push for (`GET gatekeepers/current`) |
 
 The old `push_input`, `get_input_item`, `find_input_items`, `input_ingest_status`, `input_schema` remain as aliases.

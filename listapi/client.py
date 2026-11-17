@@ -64,6 +64,7 @@ class Client:
         self._session.headers.setdefault("Accept", "application/json")
         #: Input queue (Gatekeeper pushes): ``client.input.push(...)``; see :mod:`listapi.input`.
         self.input = InputNamespace(self)
+        self._server_info: dict[str, Any] | None = None
 
     def refresh(self) -> bool:
         """
@@ -160,6 +161,22 @@ class Client:
             return resp.json()
         except ValueError:
             return resp
+
+    def server_info(self, *, refresh: bool = False) -> dict[str, Any]:
+        """
+        Which LiST build this is: ``GET api/v1/system-config`` (anonymous) ``build`` block —
+        ``branch``, ``commitHash``, ``buildDate``, ``version`` — plus ``environment``. Cached per
+        client; ``refresh=True`` asks again. The build's ``version`` is not a feature level (production
+        reports ``1.0.0``); use feature checks such as ``client.input.supported()``.
+        """
+        if self._server_info is None or refresh:
+            data = self.get("system-config", version=1)
+            if not isinstance(data, dict):
+                raise ValueError(f"Expected object from system-config, got {type(data)}")
+            info = dict(data.get("build") or {})
+            info["environment"] = data.get("environment")
+            self._server_info = info
+        return dict(self._server_info)
 
     def whoami(self) -> dict[str, Any]:
         """
