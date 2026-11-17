@@ -57,8 +57,8 @@ def sign_in(
     Env: ``LIST_URL``, ``LIST_API_KEY``, ``LIST_AUTH_METHOD`` fill gaps when not
     passed explicitly.
 
-    - If ``api_key`` is a non-empty string (arg, env, or config): ``X-API-Key``,
-      then try ``POST /auth/jwt/api`` for a LiST JWT; on failure keep the key.
+    - If ``api_key`` is a non-empty string (arg, env, or config): ``X-API-Key`` on every call;
+      no JWT exchange and no Entra (see :func:`sign_in_api_key`).
     - An explicit ``method`` (``"api_key"``, ``"entra"`` or ``"shibboleth"``) is
       always honoured, even if an API key is configured; ``"api_key"`` raises
       ``ValueError`` when there is no key.
@@ -132,15 +132,11 @@ def _resolve_entra_mode(entra: EntraMode | None) -> EntraMode:
 
 
 def sign_in_api_key(base_url: str, api_key: str, *, api_version: int = 2) -> Client:
-    """Sign in with a LiST API key, exchanging it for a JWT when possible."""
-    base_url = base_url.rstrip("/")
-    jwt, expiration = post_for_jwt(base_url, "auth/jwt/api", api_key=api_key)
-    if jwt:
-        return Client(
-            base_url, api_key=api_key, jwt=jwt, api_version=api_version, jwt_expiration=expiration
-        )
-    logger.warning("POST /auth/jwt/api failed; continuing with X-API-Key only")
-    return Client(base_url, api_key=api_key, jwt=None, api_version=api_version)
+    """Use a LiST API key: it is sent as ``X-API-Key`` on every call.
+
+    No JWT exchange: ``auth/jwt/api`` refuses API keys (decided 2026-11-13).
+    """
+    return Client(base_url.rstrip("/"), api_key=api_key, jwt=None, api_version=api_version)
 
 
 def sign_in_entra(
@@ -448,7 +444,13 @@ def _fetch_msal_config(base_url: str) -> dict[str, Any]:
     import requests
 
     url = urljoin(base_url + "/", "api/v1/system-config")
-    resp = requests.get(url, timeout=60)
+    resp = requests.get(url, timeout=60, allow_redirects=False)
+    if 300 <= resp.status_code < 400:
+        raise RuntimeError(
+            f"GET {url} was redirected ({resp.status_code}) to "
+            f"{resp.headers.get('Location') or '(no Location header)'} - "
+            "use that host/path as the LiST base URL."
+        )
     resp.raise_for_status()
     data = resp.json()
     if not isinstance(data, dict):

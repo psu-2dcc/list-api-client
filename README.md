@@ -81,7 +81,7 @@ client = sign_in(url="https://list.2dccmip.org/list/dotnet", api_key="…")
 
 | Mode | When |
 |------|------|
-| **API key** | Non-empty key from arg / `LIST_API_KEY` / config. Calls `POST /auth/jwt/api`, then sends `X-API-Key` (and Bearer JWT when obtained) on **every** request. |
+| **API key** | Non-empty key from arg / `LIST_API_KEY` / config. Sends `X-API-Key` on **every** request; no JWT exchange (`auth/jwt/api` refuses API keys). |
 | **Entra** | No API key, `method="entra"` (default) or `LIST_AUTH_METHOD=entra`. Needs `listapi[entra]`. Browser by default; `sign_in(entra="device")` or `LIST_ENTRA_MODE=device` for SSH. MSAL cache: `~/.list/msal_cache.bin`. |
 | **Shibboleth** | No API key, `method="shibboleth"` or `LIST_AUTH_METHOD=shibboleth`. Opens a browser to your institution's login if needed, then asks you to confirm the sign-in for the shown account and local port (PKCE-protected, so it is never silent); needs a LiST server with the `auth/shibboleth-cli` / `auth/jwt/shib` endpoints. |
 
@@ -143,16 +143,28 @@ Needs a LiST build with the input queue / instrument history APIs. Gatekeeper ke
 **api/v2** — the client default.
 
 **Input queue** — push files into `.input-queue` for LiST to place ([docs/input-queue.md](docs/input-queue.md),
-`examples/input_push.py`):
+`examples/input_push.py`). The Gatekeeper key is sent on every call (no JWT exchange); the client tells LiST each
+file's **role** (`sample-definition`, `recipe`, `log`, `data`, `characterization`) and never decides synthesis vs.
+characterization:
+
+```python
+client = sign_in(url, api_key=gatekeeper_key)
+client.input.push([("run1.rcp", "recipe"), ("run1.bin", "log")], metadata={"instrument": "MBE2", "user": orcid})
+```
 
 | Method / symbol | Notes |
 |-----------------|--------|
-| `client.push_input(files, metadata)` | `POST input` multipart; `listapi.input.InputMetadata` / dict / JSON; 200 if all known, 202 if new |
-| `client.get_input_item(id)` / `find_input_items(submission_id=…\|external_key=…)` | Own items (or InputQueue Read) |
-| `client.input_ingest_status()` | Sender bookmark: counts per status |
-| `client.input_schema()` | JSON Schema of `list-input/1` |
+| `client.input.push(files, metadata)` | `POST input`: one request, sha256 per file, streamed, default `externalKey` `{instrument}/{role}/{fileName}` (`{instrument}/{run.key}/…` with a run key), retries on network/5xx; `PushResult(submission_id, items, created)` (202 → `created`, 200 → not) |
+| `client.input.push_folder(path, instrument, role_by_glob)` | One request per run folder; skips files `exists` reports known |
+| `client.input.exists(items)` | Is `externalKey` + `sha256` already pushed? (≤ 500 per call, split automatically) |
+| `client.input.status()` / `get(id)` / `find(submission_id=… \| external_key=…)` | Bookmark; own items |
+| `client.input.schema()` | JSON Schema of `list-input/1` |
+| `client.input.wait(submission_id, timeout)` | Poll until no item is received/queued/moving |
+| `InputMetadata`, `InputRun`, `PushFile`, `ROLES`, `STATUS_*` | Typed metadata (absent values omitted) and constants |
+| `BadRequestError` / `ForbiddenError` / `NotFoundError` / `PayloadTooLargeError` / `RoleUnknown` | `ListApiError` subclasses (400 / 403 / 404 / 413 / local) with `status_code`, `detail` |
 | `client.current_gatekeeper()` | Instruments this key may push for (`GET gatekeepers/current`) |
-| `listapi.input` constants | `SCHEMA_V1`, `KIND_*`, `STATUS_*`, `file_sha256` |
+
+The old `push_input`, `get_input_item`, `find_input_items`, `input_ingest_status`, `input_schema` remain as aliases.
 
 **Instrument history** ([docs/instrument-history.md](docs/instrument-history.md), `examples/instrument_log_push.py`):
 

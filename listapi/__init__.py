@@ -20,14 +20,22 @@ from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from listapi.auth import sign_in, sign_in_api_key, sign_in_entra, sign_in_shibboleth
 from listapi.client import Client
-from listapi.errors import ListApiError, SignInCancelled
+from listapi.errors import (
+    BadRequestError,
+    ForbiddenError,
+    ListApiError,
+    NotFoundError,
+    PayloadTooLargeError,
+    RoleUnknown,
+    SignInCancelled,
+)
 from listapi.input import (
-    KIND_ATTACHMENT,
-    KIND_CHARACTERIZATION,
-    KIND_SAMPLE_DEFINITION,
-    KIND_SIMULATION,
-    KIND_SYNTHESIS,
-    KINDS,
+    ROLE_CHARACTERIZATION,
+    ROLE_DATA,
+    ROLE_LOG,
+    ROLE_RECIPE,
+    ROLE_SAMPLE_DEFINITION,
+    ROLES,
     SCHEMA_V1,
     STATUS_DISCARDED,
     STATUS_DONE,
@@ -38,10 +46,18 @@ from listapi.input import (
     STATUS_RECEIVED,
     STATUS_WAITING,
     STATUS_LABELS,
+    ExistsResult,
     InputFileEntry,
     InputMetadata,
+    InputNamespace,
     InputPushResult,
-    describe_input_kind,
+    InputRun,
+    InputSource,
+    ItemState,
+    PushedItem,
+    PushFile,
+    PushResult,
+    describe_input_error,
     describe_input_status,
     file_sha256,
 )
@@ -69,7 +85,7 @@ try:
     __version__ = _pkg_version("listapi")
 except PackageNotFoundError:
     # Source tree without an install (e.g. raw path on sys.path).
-    __version__ = "0.8.0"
+    __version__ = "0.9.0"
 
 __all__ = [
     "Client",
@@ -79,16 +95,29 @@ __all__ = [
     "InstrumentPushError",
     "InstrumentPushResult",
     "stable_key",
+    "BadRequestError",
+    "ForbiddenError",
+    "NotFoundError",
+    "PayloadTooLargeError",
+    "RoleUnknown",
     "InputMetadata",
     "InputFileEntry",
+    "InputRun",
+    "InputSource",
+    "InputNamespace",
+    "PushFile",
+    "PushResult",
+    "PushedItem",
     "InputPushResult",
+    "ExistsResult",
+    "ItemState",
     "SCHEMA_V1",
-    "KINDS",
-    "KIND_SAMPLE_DEFINITION",
-    "KIND_SYNTHESIS",
-    "KIND_CHARACTERIZATION",
-    "KIND_SIMULATION",
-    "KIND_ATTACHMENT",
+    "ROLES",
+    "ROLE_SAMPLE_DEFINITION",
+    "ROLE_RECIPE",
+    "ROLE_LOG",
+    "ROLE_DATA",
+    "ROLE_CHARACTERIZATION",
     "STATUS_RECEIVED",
     "STATUS_QUEUED",
     "STATUS_MOVING",
@@ -99,7 +128,7 @@ __all__ = [
     "STATUS_DUPLICATE",
     "STATUS_LABELS",
     "describe_input_status",
-    "describe_input_kind",
+    "describe_input_error",
     "file_sha256",
     "sign_in",
     "sign_in_api_key",

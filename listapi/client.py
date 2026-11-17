@@ -14,12 +14,7 @@ import requests
 from listapi import ids
 from listapi._jwt import post_for_jwt
 from listapi.errors import ListApiError
-from listapi.input import (
-    InputMetadata,
-    InputPushResult,
-    metadata_json,
-    normalize_upload_parts,
-)
+from listapi.input import InputMetadata, InputNamespace, PushResult
 from listapi.instruments import (
     MAX_EVENTS_PER_PUSH,
     InstrumentEvent,
@@ -67,6 +62,8 @@ class Client:
         if api_key:
             self._session.headers["X-API-Key"] = api_key
         self._session.headers.setdefault("Accept", "application/json")
+        #: Input queue (Gatekeeper pushes): ``client.input.push(...)``; see :mod:`listapi.input`.
+        self.input = InputNamespace(self)
 
     def refresh(self) -> bool:
         """
@@ -117,6 +114,7 @@ class Client:
         if self._jwt_near_expiry():
             self.refresh()
         logger.debug("%s %s", method.upper(), url)
+        kwargs.setdefault("allow_redirects", False)  # surfaced by _raise as RedirectError
         resp = self._session.request(method, url, timeout=timeout, **kwargs)
         if resp.status_code == 401 and self.jwt and self.refresh():
             logger.debug("401 on %s %s; refreshed JWT and retrying once", method.upper(), url)
@@ -124,7 +122,7 @@ class Client:
         return resp
 
     def _raise(self, resp: requests.Response, what: str) -> None:
-        if resp.ok:
+        if resp.ok and not 300 <= resp.status_code < 400:
             return
         raise ListApiError.from_response(resp, what)
 
@@ -979,6 +977,9 @@ class Client:
         description: str | None = None,
         metadata: dict[str, Any] | None = None,
         visibility: str | None = None,
+        source_file_ids: Iterable[int] | None = None,
+        processing_method: str | None = None,
+        processing_relation: str | None = None,
     ) -> dict[str, Any]:
         """
         POST /api/v{n}/sample-activities/{id}/files/upload (plain attachment).
@@ -988,9 +989,14 @@ class Client:
         to set the column type too. ``visibility``: ``P`` (on publication),
         ``U`` (PI only) or ``I`` (internal). Returns the file-group metadata.
 
-        Re-uploading under an existing basename adds a version to that group and
-        the server ignores ``description`` / ``visibility`` / ``metadata``; use
-        :meth:`update_file_metadata` for those.
+        Re-uploading under an existing basename adds a version to that group; the
+        ``description`` / ``visibility`` / ``metadata`` given now are applied to the
+        existing group too (:meth:`update_file_metadata` changes them later).
+
+        Processed data: ``source_file_ids`` are the ids of the files it was derived from,
+        ``processing_method`` how (e.g. "peak fit in Origin 2024"), ``processing_relation`` how it relates
+        to the sources: ``Conversion`` (same data, other format), ``Extraction`` (a subset) or
+        ``Analysis`` (new results). The method and relation need ``source_file_ids`` (else 400).
         """
         return self._upload_multipart(
             activity,
@@ -1000,6 +1006,9 @@ class Client:
             description=description,
             metadata=metadata,
             visibility=visibility,
+            source_file_ids=source_file_ids,
+            processing_method=processing_method,
+            processing_relation=processing_relation,
         )
 
     def _upload_multipart(
@@ -1012,6 +1021,9 @@ class Client:
         description: str | None,
         metadata: dict[str, Any] | None = None,
         visibility: str | None = None,
+        source_file_ids: Iterable[int] | None = None,
+        processing_method: str | None = None,
+        processing_relation: str | None = None,
     ) -> dict[str, Any]:
         aid = ids.activity_id(activity)
         name, content = _read_upload_source(source, filename=filename)
@@ -1024,6 +1036,13 @@ class Client:
         if visibility is not None:
             # Form binding parses the enum member name, not the P/U/I wire value.
             data.append(("Visibility", _VISIBILITY_FORM_NAMES[_visibility_code(visibility)]))
+        # Processed data: repeated key binds a List<int>. Names follow the form's PascalCase.
+        for source_id in source_file_ids or ():
+            data.append(("SourceFileIds", str(int(source_id))))
+        if processing_method:
+            data.append(("ProcessingMethod", processing_method))
+        if processing_relation:
+            data.append(("ProcessingRelation", processing_relation))
         # ASP.NET binds list items from indexed keys: Fields[0].Label, Fields[0].Value, ...
         for i, field in enumerate(_metadata_fields(metadata)):
             for key, value in field.items():
@@ -1199,89 +1218,29 @@ class Client:
             raise ValueError(f"Expected object from current_gatekeeper, got {type(data)}")
         return data
 
-    # -- Input queue (Gatekeeper file push) ------------------------------------
+    # -- Input queue: thin aliases for the pre-``client.input`` names ---------------------------
 
-    def push_input(
-        self,
-        files: Iterable[str | Path | tuple[str, bytes | BinaryIO | str | Path]],
-        metadata: InputMetadata | dict[str, Any] | str | None = None,
-        *,
-        version: int | None = None,
-    ) -> InputPushResult:
-        """
-        ``POST input`` — push one or more files into the LiST input queue (multipart).
+    def push_input(self, files: Iterable[Any], metadata: Any = None) -> PushResult:
+        """Alias of :meth:`listapi.input.InputNamespace.push` (``client.input.push``)."""
+        return self.input.push(files, metadata)
 
-        ``files``: paths, or ``(filename, bytes|file|path)`` tuples. ``metadata`` is ``list-input/1``
-        (:class:`listapi.input.InputMetadata`, a dict, or a JSON string); see ``listapi.input`` for kinds and
-        :meth:`input_schema`. 202 when something new was stored; 200 when every file was already known
-        (``result.all_existing``). Needs InputQueue Create; Gatekeeper keys must use **v2** (the client default).
-
-        400: bad metadata / sha256 mismatch; 403: instrument not on the Gatekeeper; 413: file too large;
-        404: input queue off.
-        """
-        parts = normalize_upload_parts(files)
-        # requests: list of tuples keeps repeated form name ``file``.
-        multipart = [
-            ("file", (name, content, _guess_mime_type(name))) for name, content in parts
-        ]
-        data: dict[str, str] | None = None
-        meta = metadata_json(metadata)
-        if meta is not None:
-            data = {"metadata": meta}
-        url = self._api("input", version=version)
-        resp = self._request("POST", url, files=multipart, data=data, timeout=300)
-        self._raise(resp, "POST input")
-        payload = resp.json()
-        if not isinstance(payload, dict):
-            raise ValueError(f"Expected object from POST input, got {type(payload)}")
-        return InputPushResult.from_response(payload, resp.status_code)
-
-    def get_input_item(self, item_id: int, *, version: int | None = None) -> dict[str, Any]:
-        """``GET input/{id}`` — one item with metadata, corrections and steps (own items, or InputQueue Read)."""
-        data = self.get(f"input/{int(item_id)}", version=version)
-        if not isinstance(data, dict):
-            raise ValueError(f"Expected object from get_input_item, got {type(data)}")
-        return data
+    def get_input_item(self, item_id: int) -> dict[str, Any]:
+        """Alias of ``client.input.get``."""
+        return self.input.get(item_id)
 
     def find_input_items(
-        self,
-        *,
-        submission_id: str | None = None,
-        external_key: str | None = None,
-        version: int | None = None,
+        self, *, submission_id: str | None = None, external_key: str | None = None
     ) -> list[dict[str, Any]]:
-        """
-        ``GET input?submissionId=|externalKey=`` — own items (or any with InputQueue Read), newest first.
+        """Alias of ``client.input.find``."""
+        return self.input.find(submission_id=submission_id, external_key=external_key)
 
-        Exactly one of ``submission_id`` / ``external_key`` is required (server 400 otherwise).
-        """
-        if (submission_id is None) == (external_key is None):
-            raise ValueError("Give exactly one of submission_id or external_key")
-        params: dict[str, str] = {}
-        if submission_id is not None:
-            params["submissionId"] = submission_id
-        if external_key is not None:
-            params["externalKey"] = external_key
-        data = self.get("input", params=params, version=version)
-        if not isinstance(data, list):
-            raise ValueError(f"Expected list from find_input_items, got {type(data)}")
-        return [row for row in data if isinstance(row, dict)]
+    def input_ingest_status(self) -> dict[str, Any]:
+        """Alias of ``client.input.status``."""
+        return self.input.status()
 
-    def input_ingest_status(self, *, version: int | None = None) -> dict[str, Any]:
-        """
-        ``GET input/ingest-status`` — this sender's bookmark: ``count``, ``latestReceived``, ``countByStatus``.
-        """
-        data = self.get("input/ingest-status", version=version)
-        if not isinstance(data, dict):
-            raise ValueError(f"Expected object from input_ingest_status, got {type(data)}")
-        return data
-
-    def input_schema(self, *, version: int | None = None) -> dict[str, Any]:
-        """``GET input/schema`` — JSON Schema of ``list-input/1`` (kinds enum included)."""
-        data = self.get("input/schema", version=version)
-        if not isinstance(data, dict):
-            raise ValueError(f"Expected object from input_schema, got {type(data)}")
-        return data
+    def input_schema(self) -> dict[str, Any]:
+        """Alias of ``client.input.schema``."""
+        return self.input.schema()
 
     # --- Instrument history --------------------------------------------------
 
