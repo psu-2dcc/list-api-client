@@ -53,6 +53,9 @@ except InstrumentPushError as e:
 - **Status**: `client.instrument_ingest_status("MBE2")` — number of pushed events, latest start, latest change.
 - **Read / UI-style write**: `client.instrument_history("MBE2")`, `create_instrument_event`, `update_instrument_event`
   (no external key; use push from scripts so re-runs stay idempotent).
+- **Older servers**: a build without instrument history makes every call above raise `FeatureNotSupported` (naming
+  the server's branch and commit) before the real request. `client.instrument_history_supported()` returns
+  True / False / None (could not tell); `client.check_server = False` skips the one-time probe.
 - Events edited in LiST's UI are overwritten by the next push of the same event.
 
 `examples/instrument_log_push.py` is a template (CSV log, type mapping, `--dry-run`) to copy to an instrument PC

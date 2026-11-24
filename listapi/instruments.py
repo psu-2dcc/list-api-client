@@ -7,7 +7,9 @@ locally (:meth:`listapi.Client.instrument_ingest_status` tells what was pushed).
 
 Authentication: a Gatekeeper API key (instruments on the Gatekeeper; role with InstrumentHistory Create/Update)
 or a role-based key that lists the instrument. Needs a LiST server with instrument history
-(``PUT/POST synthesis-instruments/{id}/events``).
+(``PUT/POST synthesis-instruments/{id}/events``). On a build without it every instrument call raises
+:class:`listapi.errors.FeatureNotSupported` (naming the server's branch and commit) before the real request;
+:meth:`listapi.Client.instrument_history_supported` tells, and ``client.check_server = False`` skips the probe.
 
 Example::
 

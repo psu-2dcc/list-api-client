@@ -13,7 +13,7 @@ import requests
 
 from listapi import ids
 from listapi._jwt import post_for_jwt
-from listapi.errors import ListApiError
+from listapi.errors import FeatureNotSupported, ListApiError
 from listapi.input import InputMetadata, InputNamespace, PushResult
 from listapi.instruments import (
     MAX_EVENTS_PER_PUSH,
@@ -65,6 +65,10 @@ class Client:
         #: Input queue (Gatekeeper pushes): ``client.input.push(...)``; see :mod:`listapi.input`.
         self.input = InputNamespace(self)
         self._server_info: dict[str, Any] | None = None
+        #: Probe the server once and refuse early on a build without instrument history
+        #: (see :meth:`instrument_history_supported`). Set False to skip the probe.
+        self.check_server = True
+        self._instrument_history_supported: bool | None = None
 
     def refresh(self) -> bool:
         """
@@ -249,10 +253,11 @@ class Client:
         sample_id: str | None = None,
         label: str | None = None,
         page_size: int = _DEFAULT_PAGE_SIZE,
+        limit: int | None = None,
         **criteria: Any,
     ) -> list[dict[str, Any]]:
         """
-        POST /api/v{n}/samples/search — auto-page until exhausted.
+        POST /api/v{n}/samples/search — auto-page until exhausted (or ``limit`` rows).
 
         Synthesis and characterization filters are independent and can be combined
         (same as SampleSearchCriteria on the server):
@@ -280,7 +285,7 @@ class Client:
             label=label,
             **criteria,
         )
-        return self._paged_search("samples/search", body, page_size=page_size)
+        return self._paged_search("samples/search", body, page_size=page_size, limit=limit)
 
     def sample_stats(
         self,
@@ -732,15 +737,19 @@ class Client:
         body: dict[str, Any],
         *,
         page_size: int,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         start = 0
         draw = 1
         while True:
+            if limit is not None and len(results) >= limit:
+                break
+            length = page_size if limit is None else min(page_size, limit - len(results))
             url = self._api(path)
             params = {
                 "start": start,
-                "length": page_size,
+                "length": length,
                 "draw": draw,
                 "sortColumn": "",
                 "sortOrder": "",
@@ -760,13 +769,13 @@ class Client:
             filtered = payload.get("recordsFiltered")
             if filtered is None:
                 filtered = payload.get("RecordsFiltered")
-            if len(page) < page_size:
+            if len(page) < length:
                 break
             start += len(page)
             if isinstance(filtered, int) and start >= filtered:
                 break
             draw += 1
-        return results
+        return results if limit is None else results[:limit]
 
     # -- Activities -----------------------------------------------------------
 
@@ -1028,6 +1037,73 @@ class Client:
             processing_relation=processing_relation,
         )
 
+    def upload_dashboard(
+        self,
+        activity: int | str | dict[str, Any],
+        source: str | Path | bytes | BinaryIO,
+        *,
+        filename: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        POST /api/v{n}/sample-activities/{id}/files/upload-dashboard.
+
+        Store a self-contained HTML dashboard on a sample activity. LiST shows it
+        in the activity view (not just as a download on the Files tab, which is
+        all ``upload_file`` gives you). Returns the file metadata with
+        ``isDashboard: True``. ``filename`` must end in ``.html`` / ``.htm``
+        (``ValueError`` otherwise); it is required when ``source`` is bytes.
+
+        - Same authorization as ``upload_file``; a submitted activity is rejected.
+        - The file is stored as-is and does not touch the recipe.
+        - Uploading again under the same file name adds a new version; under a
+          different name the old file stays on the Files tab and the most recently
+          uploaded dashboard is the one shown.
+        - Sample activities only (not project or theory activities).
+          ``GET api/v1/sample-activities/{id}/dashboard`` returns what LiST shows.
+        - Needs a LiST build with the ``files/upload-dashboard`` route. If the
+          server answers 404 for it while the activity itself exists,
+          :class:`~listapi.errors.FeatureNotSupported` is raised (naming the
+          server's branch and commit) instead of a bare 404.
+
+        The HTML is displayed in a sandboxed iframe with a restrictive
+        Content-Security-Policy: inline ``<script>`` / ``<style>`` work; images and
+        fonts must be embedded as ``data:`` URIs; external scripts, stylesheets,
+        fonts and fetch / XHR / WebSocket are blocked (bundle chart libraries
+        inline), and the page cannot reach the user's LiST session or the API. A
+        blank dashboard is almost always one of these.
+        """
+        return self._upload_multipart(
+            activity,
+            source,
+            "files/upload-dashboard",
+            filename=filename,
+            description=description,
+            require_html=True,
+            feature="dashboard upload",
+        )
+
+    def _raise_if_route_missing(self, aid: int, route: str, feature: str) -> None:
+        """A 404 on a newer route is ambiguous: no such activity, or a server build without the route.
+
+        Look the activity up (an old, always-present route). If it exists, the build lacks the
+        route: raise :class:`FeatureNotSupported` naming the build. Otherwise return and let the
+        caller raise the ordinary 404.
+        """
+        try:
+            resp = self._request("GET", self._api(f"sample-activities/{aid}"), timeout=30)
+        except requests.RequestException:
+            return
+        if resp.status_code != 200:
+            return
+        info, build = self._build_description()
+        raise FeatureNotSupported(
+            f"This LiST server{build} has no {feature} (POST api/v{self.api_version}/"
+            f"sample-activities/{aid}/{route} answered 404 although the activity exists). "
+            "It needs a newer build.",
+            server=info,
+        )
+
     def _upload_multipart(
         self,
         activity: int | str | dict[str, Any],
@@ -1041,9 +1117,13 @@ class Client:
         source_file_ids: Iterable[int] | None = None,
         processing_method: str | None = None,
         processing_relation: str | None = None,
+        require_html: bool = False,
+        feature: str | None = None,
     ) -> dict[str, Any]:
         aid = ids.activity_id(activity)
         name, content = _read_upload_source(source, filename=filename)
+        if require_html and not name.lower().endswith((".html", ".htm")):
+            raise ValueError("dashboard must be an .html or .htm file")
         mime = _guess_mime_type(name)
         url = self._api(f"sample-activities/{aid}/{route}")
         files = {"UploadFile": (name, content, mime)}
@@ -1065,6 +1145,8 @@ class Client:
             for key, value in field.items():
                 data.append((f"Fields[{i}].{key[0].upper()}{key[1:]}", str(value)))
         resp = self._request("POST", url, files=files, data=data or None, timeout=300)
+        if resp.status_code == 404 and feature:
+            self._raise_if_route_missing(aid, route, feature)
         self._raise(resp, f"POST sample-activities/{aid}/{route}")
         payload = resp.json()
         if not isinstance(payload, dict):
@@ -1164,7 +1246,7 @@ class Client:
             params["filterStatus"] = filter_status
         if sample_id:
             params["sampleId"] = sample_id
-        url = self._api(f"sample-import/{instrument_id}", version=1)
+        url = self._api(f"sample-import/{instrument_id}")
         resp = self._request("GET", url, params=params)
         self._raise(resp, f"GET sample-import/{instrument_id}")
         data = resp.json()
@@ -1181,7 +1263,7 @@ class Client:
         increment_retries: bool = False,
     ) -> None:
         """PATCH /api/v1/sample-import/{id}/outcome."""
-        url = self._api(f"sample-import/{record_id}/outcome", version=1)
+        url = self._api(f"sample-import/{record_id}/outcome")
         body: dict[str, Any] = {"status": status, "message": message}
         if increment_retries:
             body["incrementRetries"] = True
@@ -1197,7 +1279,7 @@ class Client:
         recreate_recipe: bool = False,
     ) -> dict[str, Any]:
         """POST /api/v1/sample-import — inline XML/JSON/YAML sample definition."""
-        url = self._api("sample-import", version=1)
+        url = self._api("sample-import")
         params: dict[str, str] = {}
         if force_update:
             params["forceUpdate"] = "true"
@@ -1261,6 +1343,50 @@ class Client:
 
     # --- Instrument history --------------------------------------------------
 
+    def _build_description(self) -> tuple[dict[str, Any], str]:
+        """``server_info()`` (``{}`` if unavailable) and `` (branch @ commit, built date)`` for messages."""
+        try:
+            info = self.server_info()
+        except Exception:  # the message is only richer with it
+            info = {}
+        build = ""
+        if info.get("branch") or info.get("commitHash"):
+            build = (
+                f" ({info.get('branch') or '?'} @ {info.get('commitHash') or '?'}"
+                f", built {info.get('buildDate') or '?'})"
+            )
+        return info, build
+
+    def instrument_history_supported(self) -> bool | None:
+        """Does this server build have instrument history? Probes ``GET instrument-event-types`` once and caches it.
+
+        ``True``: it has it. ``False``: the build has no instrument history (404). ``None``: could not tell
+        (network error, other status); calls are then attempted anyway.
+        """
+        if self._instrument_history_supported is None:
+            try:
+                resp = self._request("GET", self._api("instrument-event-types"), timeout=30)
+            except requests.RequestException:
+                return None
+            if resp.status_code == 200:
+                self._instrument_history_supported = True
+            elif resp.status_code == 404:
+                self._instrument_history_supported = False
+            else:
+                return None
+        return self._instrument_history_supported
+
+    def _require_instrument_history(self) -> None:
+        if not self.check_server or self.instrument_history_supported() is not False:
+            return
+        info, build = self._build_description()
+        raise FeatureNotSupported(
+            f"This LiST server{build} has no instrument history (GET api/v{self.api_version}/"
+            "instrument-event-types answered 404). It needs a build with instrument history.",
+            server=info,
+        )
+
+
     def instrument_history(
         self,
         instrument: str,
@@ -1274,6 +1400,7 @@ class Client:
 
         ``kinds``: ``SampleRun``, ``Event``, or both (default). Returns ``entries`` and ``canEditEvents``.
         """
+        self._require_instrument_history()
         params: dict[str, Any] = {}
         if start is not None:
             params["from"] = _as_iso(start)
@@ -1300,6 +1427,7 @@ class Client:
         Prefer :meth:`push_instrument_events` from an instrument-side script (idempotent by external key).
         """
         body = event.to_json() if isinstance(event, InstrumentEvent) else event
+        self._require_instrument_history()
         path = f"synthesis-instruments/{quote(instrument, safe='')}/events"
         data = self.post(path, json=body)
         if not isinstance(data, dict):
@@ -1318,6 +1446,7 @@ class Client:
         External key and API key of a pushed event are kept so the next script push still finds it.
         """
         body = event.to_json() if isinstance(event, InstrumentEvent) else event
+        self._require_instrument_history()
         path = f"synthesis-instruments/{quote(instrument, safe='')}/events/{int(event_id)}"
         data = self.put(path, json=body)
         if not isinstance(data, dict):
@@ -1347,6 +1476,7 @@ class Client:
         items = [
             e.to_json(for_push=True) if isinstance(e, InstrumentEvent) else e for e in events
         ]
+        self._require_instrument_history()
         path = f"synthesis-instruments/{quote(instrument, safe='')}/events"
         total = InstrumentPushResult()
         for offset in range(0, len(items), batch_size):
@@ -1374,6 +1504,7 @@ class Client:
 
         Returns False if there is no event with that key.
         """
+        self._require_instrument_history()
         path = f"synthesis-instruments/{quote(instrument, safe='')}/events/by-key"
         resp = self._request("DELETE", self._api(path), params={"externalKey": external_key})
         if resp.status_code == 404:
@@ -1383,6 +1514,7 @@ class Client:
 
     def delete_instrument_event_by_id(self, instrument: str, event_id: int) -> None:
         """``DELETE synthesis-instruments/{instrument}/events/{eventId}`` — remove by LiST id."""
+        self._require_instrument_history()
         path = f"synthesis-instruments/{quote(instrument, safe='')}/events/{int(event_id)}"
         resp = self._request("DELETE", self._api(path))
         self._raise(resp, f"DELETE {path}")
@@ -1393,10 +1525,12 @@ class Client:
         ``latestEventStart``, ``latestEventChange`` (server time; null when nothing was pushed). Use it to resume
         reading a log where the last push stopped.
         """
+        self._require_instrument_history()
         return self.get(f"synthesis-instruments/{quote(instrument, safe='')}/ingest-status")
 
     def list_instrument_event_types(self) -> list[dict[str, Any]]:
         """``GET instrument-event-types`` — configured event type ids (MAINT, BAKE, …)."""
+        self._require_instrument_history()
         data = self.get("instrument-event-types")
         if not isinstance(data, list):
             raise ValueError(f"Expected list from list_instrument_event_types, got {type(data)}")
